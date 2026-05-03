@@ -429,11 +429,11 @@ def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) 
 
     try:
         target = resolve_target(agent.expected_hostname, agent.ip_fallback)
-        from timelapse_agent import AGENT_VERSION  # noqa: WPS433
+        agent_version = (REPO_ROOT / "agent" / "VERSION").read_text(encoding="utf-8").strip()
         install_script = build_install_script(
             camera_id=agent_id,
             server_url=server_url,
-            agent_version=AGENT_VERSION,
+            agent_version=agent_version,
         )
         payload_files = {
             "timelapse_agent.py": REPO_ROOT / "agent" / "timelapse_agent.py",
