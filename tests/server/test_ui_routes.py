@@ -18,3 +18,16 @@ def test_unknown_route_falls_through_to_shell(client):
     response = client.get("/agents/new")
     assert response.status_code == 200
     assert "<title>Timelapse" in response.text
+
+
+def test_view_modules_served(client):
+    for module in ("dashboard.js", "create-agent.js", "camera.js"):
+        response = client.get(f"/static/views/{module}")
+        assert response.status_code == 200, module
+        assert "registerView" in response.text
+
+
+def test_app_js_served(client):
+    response = client.get("/static/app.js")
+    assert response.status_code == 200
+    assert "hashchange" in response.text

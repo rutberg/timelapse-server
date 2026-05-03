@@ -59,6 +59,20 @@ await Promise.all([
   import("/static/views/camera.js"),
 ]);
 
+function highlightActive() {
+  const hash = window.location.hash || "#/dashboard";
+  document.querySelectorAll("nav a").forEach((link) => {
+    if (hash.startsWith(link.getAttribute("href"))) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  });
+}
+
+window.addEventListener("hashchange", highlightActive);
+highlightActive();
+
 if (!window.location.hash) {
   window.location.hash = "#/dashboard";
 }
