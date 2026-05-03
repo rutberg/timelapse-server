@@ -30,6 +30,24 @@ function relativeTime(iso) {
   return `${Math.round(seconds / 3600)}h ago`;
 }
 
+export function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function pendingBadge(status) {
+  const count = status?.pending_count || 0;
+  if (count === 0) return "";
+  const bytes = formatBytes(status?.pending_bytes || 0);
+  const tag = status?.is_online
+    ? `<span class="status-online">uploading ${count} queued · ${bytes}</span>`
+    : `<span class="status-offline">${count} queued offline · ${bytes}</span>`;
+  return `<br />${tag}`;
+}
+
 async function renderDashboard(root) {
   root.innerHTML = `
     <h2>Cameras</h2>
@@ -59,7 +77,7 @@ async function renderDashboard(root) {
           <p>
             Last seen: ${relativeTime(camera.status?.last_seen)}<br />
             Last capture: ${relativeTime(camera.status?.last_capture_at)}<br />
-            Images: ${camera.image_count}
+            Images: ${camera.image_count}${pendingBadge(camera.status)}
           </p>
           ${camera.status?.last_error ? `<p class="status-failed">Error: ${escapeHtml(camera.status.last_error)}</p>` : ""}
           <footer><a href="#/cameras/${encodeURIComponent(camera.camera_id)}" role="button">Open</a></footer>

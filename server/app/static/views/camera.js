@@ -1,4 +1,5 @@
 import { api, registerView } from "/static/app.js";
+import { formatBytes } from "/static/views/dashboard.js";
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -55,6 +56,7 @@ async function renderCamera(root, hash) {
           <li><strong>Last upload:</strong> ${escapeHtml(status.last_upload_at || "-")}</li>
           <li><strong>Last error:</strong> ${escapeHtml(status.last_error || "none")}</li>
           <li><strong>Image count:</strong> ${camera.image_count}</li>
+          <li><strong>Pending uploads:</strong> ${status.pending_count || 0} (${formatBytes(status.pending_bytes || 0)})</li>
         </ul>
       `;
       currentConfig = camera.config;
