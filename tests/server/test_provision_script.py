@@ -31,6 +31,17 @@ def test_script_installs_camera_packages_and_enables_service():
     assert "systemctl enable --now timelapse-agent" in script
 
 
+def test_script_writes_version_file_into_version_dir():
+    script = build_install_script(
+        camera_id="x",
+        server_url="http://x:8080",
+        agent_version="0.3.0",
+    )
+    assert "AGENT_VERSION=\"0.3.0\"" in script
+    assert "sudo tee \"$VERSION_DIR/VERSION\"" in script
+    assert "sudo chmod 644 \"$VERSION_DIR/VERSION\"" in script
+
+
 def test_script_rejects_dangerous_input():
     import pytest
     with pytest.raises(ValueError):

@@ -185,7 +185,7 @@ def check_for_update(
         bundle_path = download_bundle(bundle_url, download_dir)
         verify_sha256(bundle_path, sha)
         install_bundle(bundle_path, desired, install_root)
-    except UpdateError as error:
+    except (UpdateError, HTTPError, URLError, TimeoutError) as error:
         logging.error("Update failed: %s", error)
         return False
     finally:

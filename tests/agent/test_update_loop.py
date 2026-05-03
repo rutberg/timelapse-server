@@ -66,3 +66,22 @@ def test_check_for_update_handles_404_gracefully(tmp_path: Path):
         applied = agent.check_for_update(settings, install_root=tmp_path / "i", work_dir=tmp_path / "w")
 
     assert applied is False
+
+
+def test_check_for_update_handles_bundle_download_network_error(tmp_path: Path):
+    settings = {"camera_id": "x", "server_url": "http://server"}
+
+    def fake_urlopen(request, timeout=None):
+        return make_manifest_response("9.9.9", "http://server/api/releases/timelapse-agent-9.9.9.tar.gz", "deadbeef")
+
+    def fake_download(url, dest_dir):
+        from urllib.error import URLError
+        raise URLError("temporary network failure")
+
+    with patch.object(agent, "urlopen", side_effect=fake_urlopen), \
+         patch.object(agent, "download_bundle", side_effect=fake_download), \
+         patch.object(agent, "install_bundle") as mock_install:
+        applied = agent.check_for_update(settings, install_root=tmp_path / "i", work_dir=tmp_path / "w")
+
+    assert applied is False
+    mock_install.assert_not_called()

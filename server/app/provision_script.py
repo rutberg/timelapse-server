@@ -41,6 +41,8 @@ def build_install_script(camera_id: str, server_url: str, agent_version: str) ->
         sudo install -d -m 755 "$VERSION_DIR" /etc/timelapse-agent /var/lib/timelapse-agent
 
         sudo install -m 755 /tmp/timelapse-provision/timelapse_agent.py "$VERSION_DIR/timelapse_agent.py"
+        printf '%s\\n' "$AGENT_VERSION" | sudo tee "$VERSION_DIR/VERSION" >/dev/null
+        sudo chmod 644 "$VERSION_DIR/VERSION"
         sudo ln -sfn "$VERSION_DIR" "$INSTALL_ROOT/current"
 
         sudo install -m 644 /tmp/timelapse-provision/timelapse-agent.service /etc/systemd/system/timelapse-agent.service
