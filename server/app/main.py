@@ -20,7 +20,7 @@ app = FastAPI(title="Hydroponic Timelapse Server")
 
 DATA_DIR = Path(os.environ.get("TIMELAPSE_DATA_DIR", "./data")).resolve()
 STORE_PATH = DATA_DIR / "config.json"
-IDENTIFIER_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+VALID_CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 DEFAULT_ALLOWED_NETWORKS = (
     "127.0.0.0/8,"
     "10.0.0.0/8,"
@@ -93,10 +93,15 @@ def lan_client_allowed(request: Request) -> bool:
 
 
 def safe_identifier(value: str) -> str:
-    cleaned = IDENTIFIER_RE.sub("-", value).strip(".-_")
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="Identifier cannot be empty")
-    return cleaned
+    if not value or not VALID_CAMERA_ID_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid camera id: must be 1-63 characters, start with "
+                "alphanumeric, and contain only [a-zA-Z0-9_.-]"
+            ),
+        )
+    return value
 
 
 def ensure_data_dir() -> None:
@@ -369,7 +374,13 @@ def generate_video(
     video_dir = DATA_DIR / "videos" / camera_id
     video_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    requested_name = safe_identifier(request.name) if request.name else f"timelapse-{timestamp}"
+    if request.name:
+        try:
+            requested_name = safe_identifier(request.name)
+        except HTTPException as error:
+            raise HTTPException(status_code=400, detail=f"Invalid video name: {error.detail}") from error
+    else:
+        requested_name = f"timelapse-{timestamp}"
     output_path = video_dir / f"{requested_name}.mp4"
     list_path = video_dir / f"{requested_name}.txt"
 
