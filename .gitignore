@@ -12,3 +12,6 @@ venv.bak/
 .vscode/
 *.swp
 *.swo
+.worktrees/
+.venv-dev/
+dist/
