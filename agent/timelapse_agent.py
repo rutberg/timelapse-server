@@ -12,11 +12,15 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+AGENT_VERSION = "0.3.0"
 
 
 DEFAULT_REMOTE_CONFIG = {
@@ -27,6 +31,13 @@ DEFAULT_REMOTE_CONFIG = {
     "jpeg_quality": 85,
     "config_version": 0,
 }
+
+
+@dataclass
+class AgentState:
+    last_capture_at: Optional[str] = None
+    last_upload_at: Optional[str] = None
+    last_error: Optional[str] = None
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -47,6 +58,33 @@ def request_json(url: str, timeout: int = 20) -> Dict[str, Any]:
     request = Request(url, method="GET")
     with urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def post_json(url: str, payload: Dict[str, Any], timeout: int = 15) -> Dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
+    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/checkin"
+    payload = {
+        "agent_version": AGENT_VERSION,
+        "hostname": socket.gethostname(),
+        "last_capture_at": state.last_capture_at,
+        "last_upload_at": state.last_upload_at,
+        "last_error": state.last_error,
+    }
+    try:
+        post_json(url, payload)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+        logging.warning("Heartbeat failed: %s", error)
 
 
 def post_multipart(
@@ -159,7 +197,7 @@ def fetch_remote_config(settings: Dict[str, Any], cache_path: Path) -> Dict[str,
         return DEFAULT_REMOTE_CONFIG.copy()
 
 
-def upload_pending(settings: Dict[str, Any], work_dir: Path) -> None:
+def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) -> None:
     pending_dir = work_dir / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/upload"
@@ -167,16 +205,22 @@ def upload_pending(settings: Dict[str, Any], work_dir: Path) -> None:
     for image_path in sorted(pending_dir.glob("*.jpg")):
         metadata_path = image_path.with_suffix(".json")
         metadata = load_json(metadata_path) if metadata_path.exists() else {}
-        captured_at = metadata.get("captured_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        captured_at = metadata.get(
+            "captured_at",
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
 
         try:
             post_multipart(url, image_path, captured_at)
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
             logging.warning("Upload failed for %s: %s", image_path.name, error)
+            state.last_error = f"upload failed: {error}"
             return
 
         image_path.unlink(missing_ok=True)
         metadata_path.unlink(missing_ok=True)
+        state.last_upload_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        state.last_error = None
         logging.info("Uploaded %s", image_path.name)
 
 
@@ -192,12 +236,14 @@ def run_agent(settings: Dict[str, Any]) -> None:
     cache_path = work_dir / "server-config.json"
 
     poll_seconds = int(settings.get("config_poll_seconds", 60))
+    state = AgentState()
     remote_config = fetch_remote_config(settings, cache_path)
     last_capture: Optional[float] = None
     next_capture = time.monotonic()
     next_config_poll = time.monotonic() + poll_seconds
 
-    logging.info("Agent started for camera_id=%s", settings["camera_id"])
+    logging.info("Agent v%s started for camera_id=%s", AGENT_VERSION, settings["camera_id"])
+    post_checkin(settings, state)
 
     while True:
         now = time.monotonic()
@@ -209,22 +255,26 @@ def run_agent(settings: Dict[str, Any]) -> None:
             if new_interval != previous_interval:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
+            post_checkin(settings, state)
             next_config_poll = now + poll_seconds
 
-        upload_pending(settings, work_dir)
+        upload_pending(settings, work_dir, state)
 
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))
         if enabled and now >= next_capture:
             try:
                 image_path = capture_frame(work_dir, remote_config)
+                state.last_capture_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                state.last_error = None
                 logging.info("Captured %s", image_path.name)
-            except Exception:
+            except Exception as error:
+                state.last_error = str(error)
                 logging.exception("Capture failed")
                 next_capture = now + min(300, interval_seconds)
             else:
                 last_capture = time.monotonic()
-                upload_pending(settings, work_dir)
+                upload_pending(settings, work_dir, state)
                 next_capture = last_capture + interval_seconds
 
         sleep_until = min(next_capture, next_config_poll)
