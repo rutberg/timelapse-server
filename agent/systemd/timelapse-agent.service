@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/timelapse-agent/timelapse_agent.py --config /etc/timelapse-agent/config.json
+ExecStart=/usr/bin/python3 /opt/timelapse-agent/current/timelapse_agent.py --config /etc/timelapse-agent/config.json
 Restart=always
 RestartSec=10
 
