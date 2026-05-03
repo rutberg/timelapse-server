@@ -165,9 +165,22 @@ def verify_sha256(path: Path, expected_hex: str) -> None:
         raise UpdateError(f"sha256 mismatch: expected {expected_hex}, got {actual}")
 
 
+def _is_macos_metadata(name: str) -> bool:
+    # AppleDouble (._foo) and Spotlight noise (.DS_Store, __MACOSX/) end up in
+    # tar archives created on macOS. Skip them on extract so install_bundle's
+    # "exactly one top-level directory" invariant holds.
+    base = Path(name).name
+    if base.startswith("._") or base == ".DS_Store":
+        return True
+    return name.startswith("__MACOSX/") or name == "__MACOSX"
+
+
 def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
     dest_resolved = dest.resolve()
+    members = []
     for member in tar.getmembers():
+        if _is_macos_metadata(member.name):
+            continue
         member_path = (dest / member.name).resolve()
         try:
             member_path.relative_to(dest_resolved)
@@ -175,7 +188,8 @@ def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
             raise UpdateError(f"unsafe path in bundle: {member.name}") from error
         if member.issym() or member.islnk():
             raise UpdateError(f"unsafe symlink in bundle: {member.name}")
-    tar.extractall(dest)
+        members.append(member)
+    tar.extractall(dest, members=members)
 
 
 def install_bundle(bundle_path: Path, version: str, install_root: Path) -> Path:

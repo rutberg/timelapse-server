@@ -60,3 +60,33 @@ def test_install_bundle_idempotent(tmp_path: Path):
     agent.install_bundle(bundle, "0.3.1", install_root)
 
     assert (install_root / "0.3.1" / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+
+
+def test_install_bundle_skips_macos_metadata(tmp_path: Path):
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    bundle_path = tmp_path / "with-metadata.tar.gz"
+    with tarfile.open(bundle_path, "w:gz") as tar:
+        for relative_name, body in (
+            ("timelapse-agent-0.4.0/timelapse_agent.py", "AGENT_VERSION = 'x'\n"),
+            ("timelapse-agent-0.4.0/VERSION", "0.4.0"),
+            # Cruft that macOS BSD tar adds when archiving directories
+            # with extended attributes:
+            ("._timelapse-agent-0.4.0", "applesingle-junk"),
+            ("timelapse-agent-0.4.0/._VERSION", "applesingle-junk"),
+            ("timelapse-agent-0.4.0/.DS_Store", "spotlight-junk"),
+            ("__MACOSX/timelapse-agent-0.4.0/._VERSION", "junk"),
+        ):
+            data = body.encode("utf-8")
+            info = tarfile.TarInfo(name=relative_name)
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+
+    agent.install_bundle(bundle_path, "0.4.0", install_root)
+
+    version_dir = install_root / "0.4.0"
+    assert version_dir.is_dir()
+    assert (version_dir / "VERSION").read_text(encoding="utf-8") == "0.4.0"
+    assert not (version_dir / "._VERSION").exists()
+    assert not (version_dir / ".DS_Store").exists()

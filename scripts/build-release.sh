@@ -52,7 +52,10 @@ cp "$REPO_ROOT/agent/timelapse_agent.py" "$PKG_DIR/"
 cp "$VERSION_FILE" "$PKG_DIR/VERSION"
 
 TARBALL="$OUT_DIR/timelapse-agent-$VERSION.tar.gz"
-tar -C "$STAGE_DIR" -czf "$TARBALL" "timelapse-agent-$VERSION"
+# COPYFILE_DISABLE keeps macOS BSD tar from embedding AppleDouble metadata
+# as PAX entries; otherwise Python's tarfile materializes them as `._*`
+# files and breaks install_bundle's single-top-dir invariant.
+COPYFILE_DISABLE=1 tar -C "$STAGE_DIR" -czf "$TARBALL" "timelapse-agent-$VERSION"
 
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$TARBALL" | awk '{print $1}' > "$TARBALL.sha256"
