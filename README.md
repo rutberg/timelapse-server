@@ -130,6 +130,30 @@ curl -X POST http://<SERVER_IP>:8080/api/cameras/<CAMERA_ID>/videos \
   -d '{"fps": 24}'
 ```
 
+### Releasing a new agent version
+
+1. Bump `agent/VERSION`.
+2. Build the bundle:
+   ```bash
+   scripts/build-release.sh --out /srv/timelapse/releases
+   ```
+3. Set the desired version on each camera:
+   ```bash
+   curl -X PUT http://<SERVER_IP>:8080/api/cameras/<CAMERA_ID>/config \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "enabled": true,
+       "interval_seconds": 600,
+       "image_width": null,
+       "image_height": null,
+       "jpeg_quality": 85,
+       "desired_agent_version": "0.3.1"
+     }'
+   ```
+4. Within one poll cycle (default 60s) the agent downloads, verifies, installs, and restarts on the new version. The next heartbeat reports the new `agent_version`.
+
+If the install fails, the agent logs `Update failed: ...` and stays on the old version. Watch with `journalctl -u timelapse-agent -f` on the Pi during rollouts.
+
 ---
 
 ## Security Note
