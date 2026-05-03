@@ -34,6 +34,38 @@ def test_checkin_with_error_persists_error(client):
     assert record["status"]["last_error"] == "camera not detected"
 
 
+def test_checkin_records_pending_queue_metrics(client):
+    response = client.post(
+        "/api/cameras/tomatoes/checkin",
+        json={
+            "agent_version": "0.3.0",
+            "pending_count": 7,
+            "pending_bytes": 2_500_000,
+        },
+    )
+    assert response.status_code == 200
+
+    record = next(
+        c for c in client.get("/api/cameras").json()["cameras"]
+        if c["camera_id"] == "tomatoes"
+    )
+    assert record["status"]["pending_count"] == 7
+    assert record["status"]["pending_bytes"] == 2_500_000
+
+
+def test_checkin_pending_count_defaults_to_zero(client):
+    client.post(
+        "/api/cameras/tomatoes/checkin",
+        json={"agent_version": "0.3.0"},
+    )
+    record = next(
+        c for c in client.get("/api/cameras").json()["cameras"]
+        if c["camera_id"] == "tomatoes"
+    )
+    assert record["status"]["pending_count"] == 0
+    assert record["status"]["pending_bytes"] == 0
+
+
 def test_checkin_creates_camera_if_missing(client):
     response = client.post(
         "/api/cameras/new-camera/checkin",

@@ -56,6 +56,23 @@ class AgentState:
     last_capture_at: Optional[str] = None
     last_upload_at: Optional[str] = None
     last_error: Optional[str] = None
+    pending_count: int = 0
+    pending_bytes: int = 0
+
+
+def measure_pending(work_dir: Path) -> tuple[int, int]:
+    pending_dir = work_dir / "pending"
+    if not pending_dir.exists():
+        return (0, 0)
+    count = 0
+    total = 0
+    for entry in pending_dir.glob("*.jpg"):
+        try:
+            total += entry.stat().st_size
+        except OSError:
+            continue
+        count += 1
+    return (count, total)
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -205,6 +222,8 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "last_capture_at": state.last_capture_at,
         "last_upload_at": state.last_upload_at,
         "last_error": state.last_error,
+        "pending_count": state.pending_count,
+        "pending_bytes": state.pending_bytes,
     }
     try:
         post_json(url, payload)
@@ -368,6 +387,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
     next_config_poll = time.monotonic() + poll_seconds
 
     logging.info("Agent v%s started for camera_id=%s", AGENT_VERSION, settings["camera_id"])
+    state.pending_count, state.pending_bytes = measure_pending(work_dir)
     post_checkin(settings, state)
 
     while True:
@@ -380,6 +400,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
             if new_interval != previous_interval:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
+            state.pending_count, state.pending_bytes = measure_pending(work_dir)
             post_checkin(settings, state)
             if check_for_update(settings):
                 logging.info("Exiting to allow systemd restart")
@@ -387,6 +408,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
             next_config_poll = now + poll_seconds
 
         upload_pending(settings, work_dir, state)
+        state.pending_count, state.pending_bytes = measure_pending(work_dir)
 
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))

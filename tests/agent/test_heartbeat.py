@@ -36,6 +36,47 @@ def test_post_checkin_sends_expected_payload():
     assert captured["body"]["last_upload_at"] == "2026-05-03T12:00:05Z"
     assert captured["body"]["last_error"] is None
     assert captured["body"]["hostname"]
+    assert captured["body"]["pending_count"] == 0
+    assert captured["body"]["pending_bytes"] == 0
+
+
+def test_post_checkin_includes_pending_counts():
+    settings = {"camera_id": "tomatoes", "server_url": "http://server.local:8080"}
+    state = agent.AgentState(pending_count=12, pending_bytes=4_500_000)
+
+    captured: dict = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        response = MagicMock()
+        response.read.return_value = b'{"acknowledged": true}'
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda self, *args: None
+        return response
+
+    with patch.object(agent, "urlopen", side_effect=fake_urlopen):
+        agent.post_checkin(settings, state)
+
+    assert captured["body"]["pending_count"] == 12
+    assert captured["body"]["pending_bytes"] == 4_500_000
+
+
+def test_measure_pending_counts_jpgs_only(tmp_path):
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    (pending / "a.jpg").write_bytes(b"x" * 100)
+    (pending / "b.jpg").write_bytes(b"x" * 250)
+    (pending / "c.json").write_bytes(b"{}")  # sidecar metadata, ignored
+
+    count, total = agent.measure_pending(tmp_path)
+    assert count == 2
+    assert total == 350
+
+
+def test_measure_pending_returns_zero_when_dir_missing(tmp_path):
+    count, total = agent.measure_pending(tmp_path)
+    assert count == 0
+    assert total == 0
 
 
 def test_post_checkin_swallows_network_errors():

@@ -64,6 +64,8 @@ class CameraStatus(BaseModel):
     last_upload_at: Optional[str] = None
     last_error: Optional[str] = None
     agent_version: Optional[str] = None
+    pending_count: int = 0
+    pending_bytes: int = 0
 
 
 class CameraRecord(BaseModel):
@@ -77,6 +79,8 @@ class CheckinRequest(BaseModel):
     last_capture_at: Optional[str] = None
     last_upload_at: Optional[str] = None
     last_error: Optional[str] = None
+    pending_count: Optional[int] = Field(default=None, ge=0)
+    pending_bytes: Optional[int] = Field(default=None, ge=0)
 
 
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
@@ -561,6 +565,10 @@ def post_checkin(
         status["last_capture_at"] = payload.last_capture_at
     if payload.last_upload_at is not None:
         status["last_upload_at"] = payload.last_upload_at
+    if payload.pending_count is not None:
+        status["pending_count"] = payload.pending_count
+    if payload.pending_bytes is not None:
+        status["pending_bytes"] = payload.pending_bytes
     status["last_error"] = payload.last_error
 
     cameras[camera_id] = record
