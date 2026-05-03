@@ -43,7 +43,21 @@ class CameraConfig(BaseModel):
     image_width: Optional[int] = Field(None, ge=320, le=10_000)
     image_height: Optional[int] = Field(None, ge=240, le=10_000)
     jpeg_quality: int = Field(85, ge=1, le=100)
-    config_version: int = 1
+
+
+class CameraStatus(BaseModel):
+    hostname: Optional[str] = None
+    source_ip: Optional[str] = None
+    last_seen: Optional[str] = None
+    last_capture_at: Optional[str] = None
+    last_upload_at: Optional[str] = None
+    last_error: Optional[str] = None
+    agent_version: Optional[str] = None
+
+
+class CameraRecord(BaseModel):
+    config: CameraConfig = Field(default_factory=CameraConfig)
+    status: CameraStatus = Field(default_factory=CameraStatus)
 
 
 class VideoRequest(BaseModel):
@@ -83,12 +97,43 @@ def ensure_data_dir() -> None:
     (DATA_DIR / "videos").mkdir(exist_ok=True)
 
 
+LEGACY_CONFIG_KEYS = {
+    "enabled",
+    "interval_seconds",
+    "image_width",
+    "image_height",
+    "jpeg_quality",
+    "config_version",
+}
+
+
+def migrate_camera_record(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(raw.get("config"), dict) and isinstance(raw.get("status"), dict):
+        return raw
+    legacy = {key: raw[key] for key in LEGACY_CONFIG_KEYS if key in raw}
+    legacy.pop("config_version", None)
+    return {
+        "config": model_dict(CameraConfig(**legacy)),
+        "status": model_dict(CameraStatus()),
+    }
+
+
 def load_store() -> Dict[str, Any]:
     ensure_data_dir()
     if not STORE_PATH.exists():
         return {"cameras": {}}
     with STORE_PATH.open("r", encoding="utf-8") as store_file:
-        return json.load(store_file)
+        store = json.load(store_file)
+    cameras = store.setdefault("cameras", {})
+    migrated = False
+    for camera_id, record in list(cameras.items()):
+        new_record = migrate_camera_record(record)
+        if new_record is not record:
+            cameras[camera_id] = new_record
+            migrated = True
+    if migrated:
+        save_store(store)
+    return store
 
 
 def save_store(store: Dict[str, Any]) -> None:
@@ -110,21 +155,20 @@ def get_camera_config(camera_id: str) -> CameraConfig:
     store = load_store()
     cameras = store.setdefault("cameras", {})
     if camera_id not in cameras:
-        cameras[camera_id] = model_dict(CameraConfig())
+        cameras[camera_id] = model_dict(CameraRecord())
         save_store(store)
-    return CameraConfig(**cameras[camera_id])
+    return CameraConfig(**cameras[camera_id]["config"])
 
 
 def set_camera_config(camera_id: str, config: CameraConfig) -> CameraConfig:
     camera_id = safe_identifier(camera_id)
     store = load_store()
     cameras = store.setdefault("cameras", {})
-    previous_version = int(cameras.get(camera_id, {}).get("config_version", 0))
-    data = model_dict(config)
-    data["config_version"] = previous_version + 1
-    cameras[camera_id] = data
+    record = cameras.get(camera_id) or model_dict(CameraRecord())
+    record["config"] = model_dict(config)
+    cameras[camera_id] = record
     save_store(store)
-    return CameraConfig(**data)
+    return CameraConfig(**record["config"])
 
 
 def parse_capture_time(value: Optional[str]) -> datetime:
@@ -170,12 +214,13 @@ def list_camera_images(camera_id: str) -> List[Path]:
     return sorted(base.glob("*/*.jpg"))
 
 
-def camera_summary(camera_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+def camera_summary(camera_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
     images = list_camera_images(camera_id)
     latest = images[-1] if images else None
     return {
         "camera_id": camera_id,
-        "config": config,
+        "config": record.get("config", {}),
+        "status": record.get("status", {}),
         "image_count": len(images),
         "latest_image": str(latest.relative_to(DATA_DIR)) if latest else None,
     }
