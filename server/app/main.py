@@ -4,12 +4,14 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 from ipaddress import ip_address, ip_network
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -126,6 +128,57 @@ def model_dict(model: BaseModel) -> Dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def detect_lan_ip() -> Optional[str]:
+    """Return the host's primary outgoing IPv4 address, or None.
+
+    Uses the standard UDP-connect trick: open a datagram socket toward a
+    non-routable address. The kernel picks the egress interface; no
+    packet is sent. The local socket name is the IP we'd use to reach
+    that host — i.e. our LAN address.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def _is_loopback_host(host: str) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def resolve_public_server_url(base_url: str) -> str:
+    """Pick the URL the agent on the Pi should call back on.
+
+    Priority:
+      1. TIMELAPSE_PUBLIC_URL env var (operator override).
+      2. If `base_url`'s host is loopback (127.0.0.0/8 or "localhost"),
+         substitute the server's primary LAN IP.
+      3. Otherwise pass `base_url` through unchanged.
+    """
+    override = os.environ.get("TIMELAPSE_PUBLIC_URL")
+    if override:
+        return override.rstrip("/")
+    parsed = urlparse(base_url)
+    host = parsed.hostname or ""
+    if _is_loopback_host(host):
+        lan_ip = detect_lan_ip()
+        if lan_ip:
+            netloc = f"{lan_ip}:{parsed.port}" if parsed.port else lan_ip
+            return urlunparse(parsed._replace(netloc=netloc)).rstrip("/")
+    return base_url
 
 
 def lan_client_allowed(request: Request) -> bool:
@@ -423,7 +476,7 @@ def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) 
 
     store.update_status(agent_id, status="provisioning", last_provision_error=None)
 
-    server_url = str(request.base_url).rstrip("/")
+    server_url = resolve_public_server_url(str(request.base_url).rstrip("/"))
     agent_dir = DATA_DIR / "agents" / agent_id
     private_key_path = agent_dir / "id_ed25519"
     known_hosts_path = agent_dir / "known_hosts"
