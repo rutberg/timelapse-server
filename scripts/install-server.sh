@@ -10,9 +10,9 @@ Optional environment variables:
   TIMELAPSE_REPO_URL=https://github.com/rutberg/timelapse
   TIMELAPSE_INSTALL_DIR=/opt/timelapse
   TIMELAPSE_DATA_DIR=/srv/timelapse
-  TIMELAPSE_BIND_HOST=192.168.68.52
+  TIMELAPSE_BIND_HOST=0.0.0.0
   TIMELAPSE_PORT=8080
-  TIMELAPSE_ALLOWED_NETWORKS=127.0.0.0/8,192.168.68.0/22
+  TIMELAPSE_ALLOWED_NETWORKS=127.0.0.0/8,192.168.0.0/16
 
 If TIMELAPSE_INSTALL_DIR does not already contain a Git checkout,
 TIMELAPSE_REPO_URL is required so the installer can clone the project.
