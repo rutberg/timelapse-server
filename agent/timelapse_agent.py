@@ -60,7 +60,42 @@ class AgentState:
     pending_bytes: int = 0
 
 
-DEFAULT_MAX_PENDING_BYTES = 500_000_000  # 500 MB
+FALLBACK_MAX_PENDING_BYTES = 500_000_000  # used when disk_usage fails
+
+
+def auto_max_pending_bytes(work_dir: Path) -> int:
+    """Return half of work_dir's filesystem total capacity, in bytes."""
+    try:
+        usage = shutil.disk_usage(work_dir)
+    except OSError:
+        return FALLBACK_MAX_PENDING_BYTES
+    return max(usage.total // 2, FALLBACK_MAX_PENDING_BYTES)
+
+
+def resolve_max_pending_bytes(settings: Dict[str, Any], work_dir: Path) -> int:
+    """Pick the pending cap to use.
+
+    - If max_pending_bytes is missing or null in config: auto-detect (50% of
+      work_dir partition).
+    - 0 means unlimited (no eviction).
+    - Any other positive int is honored verbatim.
+    """
+    configured = settings.get("max_pending_bytes")
+    if configured is None:
+        return auto_max_pending_bytes(work_dir)
+    return int(configured)
+
+
+def hour_in_schedule(now: datetime, capture_hours: Optional[list]) -> bool:
+    """Return True if `now`'s hour is within the schedule (or no schedule).
+
+    capture_hours of None means "no schedule, always allowed". An empty list
+    would mean "never allowed" — but the server validator rejects it, so we
+    treat it as "always" too for defensive behavior.
+    """
+    if not capture_hours:
+        return True
+    return now.hour in set(capture_hours)
 
 
 def measure_pending(work_dir: Path) -> tuple[int, int]:
@@ -437,7 +472,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
     cache_path = work_dir / "server-config.json"
 
     poll_seconds = int(settings.get("config_poll_seconds", 60))
-    max_pending_bytes = int(settings.get("max_pending_bytes", DEFAULT_MAX_PENDING_BYTES))
+    max_pending_bytes = resolve_max_pending_bytes(settings, work_dir)
     state = AgentState()
     remote_config = fetch_remote_config(settings, cache_path)
     last_capture: Optional[float] = None
@@ -473,7 +508,12 @@ def run_agent(settings: Dict[str, Any]) -> None:
 
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))
-        if enabled and now >= next_capture:
+        capture_hours = remote_config.get("capture_hours")
+        in_schedule = hour_in_schedule(datetime.now(), capture_hours)
+        if enabled and not in_schedule and now >= next_capture:
+            # Outside the schedule: skip this slot, re-check at the next interval.
+            next_capture = now + interval_seconds
+        if enabled and in_schedule and now >= next_capture:
             try:
                 image_path = capture_frame(work_dir, remote_config)
                 state.last_capture_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

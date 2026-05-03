@@ -109,6 +109,49 @@ def test_evict_pending_noop_when_under_cap(tmp_path):
     assert (pending / "a.jpg").exists()
 
 
+def test_resolve_max_pending_bytes_explicit_value(tmp_path):
+    settings = {"max_pending_bytes": 1234}
+    assert agent.resolve_max_pending_bytes(settings, tmp_path) == 1234
+
+
+def test_resolve_max_pending_bytes_zero_means_unlimited(tmp_path):
+    settings = {"max_pending_bytes": 0}
+    assert agent.resolve_max_pending_bytes(settings, tmp_path) == 0
+
+
+def test_resolve_max_pending_bytes_auto_when_missing(tmp_path, monkeypatch):
+    # Pretend the partition is 16 GB total.
+    fake_usage = type("U", (), {"total": 16 * 1024 * 1024 * 1024, "used": 0, "free": 0})()
+    monkeypatch.setattr(agent.shutil, "disk_usage", lambda p: fake_usage)
+
+    result = agent.resolve_max_pending_bytes({}, tmp_path)
+    assert result == 16 * 1024 * 1024 * 1024 // 2  # 50%
+
+
+def test_resolve_max_pending_bytes_falls_back_when_disk_query_fails(tmp_path, monkeypatch):
+    def boom(_):
+        raise OSError("denied")
+    monkeypatch.setattr(agent.shutil, "disk_usage", boom)
+
+    assert agent.resolve_max_pending_bytes({}, tmp_path) == agent.FALLBACK_MAX_PENDING_BYTES
+
+
+def test_hour_in_schedule_no_schedule_means_always():
+    from datetime import datetime
+    assert agent.hour_in_schedule(datetime(2026, 5, 3, 14), None) is True
+    assert agent.hour_in_schedule(datetime(2026, 5, 3, 14), []) is True
+
+
+def test_hour_in_schedule_only_during_listed_hours():
+    from datetime import datetime
+    schedule = [9, 10, 11, 12, 13, 14, 15, 16, 17]
+    assert agent.hour_in_schedule(datetime(2026, 5, 3, 9, 0), schedule) is True
+    assert agent.hour_in_schedule(datetime(2026, 5, 3, 17, 59), schedule) is True
+    assert agent.hour_in_schedule(datetime(2026, 5, 3, 8, 59), schedule) is False
+    assert agent.hour_in_schedule(datetime(2026, 5, 3, 18, 0), schedule) is False
+    assert agent.hour_in_schedule(datetime(2026, 5, 3, 23, 0), schedule) is False
+
+
 def test_evict_pending_disabled_when_max_bytes_zero(tmp_path):
     pending = tmp_path / "pending"
     pending.mkdir()

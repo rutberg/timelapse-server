@@ -16,7 +16,7 @@ from urllib.parse import urlparse, urlunparse
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.agents import AgentStore, PendingAgent
 from app.provision_script import build_install_script
@@ -54,6 +54,34 @@ class CameraConfig(BaseModel):
     image_height: Optional[int] = Field(None, ge=240, le=10_000)
     jpeg_quality: int = Field(85, ge=1, le=100)
     desired_agent_version: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9._-]+$")
+    capture_hours: Optional[List[int]] = Field(
+        default=None,
+        description=(
+            "Hours of day (0-23, agent local time) when capture is allowed. "
+            "None = always. Empty list rejected — use enabled=false to pause."
+        ),
+    )
+
+    @field_validator("capture_hours")
+    @classmethod
+    def _validate_capture_hours(cls, value):
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "capture_hours must be null or contain at least one hour; "
+                "use enabled=false to pause"
+            )
+        seen = set()
+        for hour in value:
+            if not isinstance(hour, int) or isinstance(hour, bool):
+                raise ValueError(f"capture_hours entries must be ints 0-23, got {hour!r}")
+            if hour < 0 or hour > 23:
+                raise ValueError(f"capture_hours entries must be 0-23, got {hour}")
+            if hour in seen:
+                raise ValueError(f"capture_hours has duplicate {hour}")
+            seen.add(hour)
+        return sorted(seen)
 
 
 class CameraStatus(BaseModel):

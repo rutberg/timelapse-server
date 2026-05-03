@@ -52,13 +52,16 @@ def test_script_rejects_dangerous_input():
         )
 
 
-def test_script_includes_max_pending_bytes_in_config():
+def test_script_omits_max_pending_bytes_so_agent_auto_detects():
+    # Agents now auto-size the pending cap to ~50% of the work_dir
+    # partition. The install script should NOT bake an explicit value
+    # so this auto behavior kicks in.
     script = build_install_script(
         camera_id="x",
         server_url="http://x:8080",
         agent_version="0.3.0",
     )
-    assert '"max_pending_bytes": 500000000' in script
+    assert "max_pending_bytes" not in script
 
 
 def test_script_omits_sudo_bootstrap_when_no_password():

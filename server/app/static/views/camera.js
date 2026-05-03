@@ -90,14 +90,42 @@ async function renderCamera(root, hash) {
       <label>JPEG quality
         <input type="number" id="c-quality" value="${config.jpeg_quality}" min="1" max="100" />
       </label>
+
+      <fieldset>
+        <legend>Capture schedule <small>(agent local time)</small></legend>
+        <label>
+          <input type="checkbox" id="c-schedule-enabled" ${config.capture_hours ? "checked" : ""} />
+          Restrict capture to specific hours
+        </label>
+        <div id="c-hours-grid" class="hours-grid" ${config.capture_hours ? "" : "hidden"}>
+          ${Array.from({ length: 24 }, (_, hour) => `
+            <label class="hour-cell">
+              <input type="checkbox" data-hour="${hour}"
+                     ${(config.capture_hours || []).includes(hour) ? "checked" : ""} />
+              <span>${String(hour).padStart(2, "0")}</span>
+            </label>
+          `).join("")}
+        </div>
+      </fieldset>
+
       <label>Desired agent version
         <input id="c-version" value="${escapeHtml(config.desired_agent_version || "")}" />
       </label>
       <button type="button" id="c-save">Save</button>
       <p id="c-msg"></p>
     `;
+    const scheduleToggle = document.getElementById("c-schedule-enabled");
+    const hoursGrid = document.getElementById("c-hours-grid");
+    scheduleToggle.addEventListener("change", () => {
+      hoursGrid.hidden = !scheduleToggle.checked;
+    });
     document.getElementById("c-save").addEventListener("click", async () => {
       const version = document.getElementById("c-version").value.trim();
+      const captureHours = scheduleToggle.checked
+        ? Array.from(hoursGrid.querySelectorAll("input[type=checkbox]:checked"))
+            .map((cb) => Number(cb.dataset.hour))
+            .sort((a, b) => a - b)
+        : null;
       const payload = {
         enabled: document.getElementById("c-enabled").checked,
         interval_seconds: Number(document.getElementById("c-interval").value),
@@ -105,6 +133,7 @@ async function renderCamera(root, hash) {
         image_height: optionalNumber("c-height"),
         jpeg_quality: Number(document.getElementById("c-quality").value),
         desired_agent_version: version || null,
+        capture_hours: captureHours,
       };
       try {
         currentConfig = await api.fetchJson(`/api/cameras/${encodedCameraId}/config`, {

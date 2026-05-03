@@ -2,6 +2,5 @@
   "camera_id": "tomatoes-zero-w",
   "server_url": "http://<SERVER_IP>:8080",
   "config_poll_seconds": 60,
-  "work_dir": "/var/lib/timelapse-agent",
-  "max_pending_bytes": 500000000
+  "work_dir": "/var/lib/timelapse-agent"
 }
