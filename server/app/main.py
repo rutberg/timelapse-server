@@ -90,6 +90,7 @@ class CreateAgentRequest(BaseModel):
 
 class ProvisionRequest(BaseModel):
     ip_fallback: Optional[str] = None
+    sudo_password: Optional[str] = Field(default=None, max_length=256)
 
 
 def validate_hostname(value: str) -> str:
@@ -434,6 +435,8 @@ def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) 
             camera_id=agent_id,
             server_url=server_url,
             agent_version=agent_version,
+            ssh_user=agent.ssh_user,
+            sudo_password=payload.sudo_password,
         )
         payload_files = {
             "timelapse_agent.py": REPO_ROOT / "agent" / "timelapse_agent.py",

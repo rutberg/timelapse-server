@@ -26,6 +26,7 @@ async function renderWizard(root) {
       hostname_override: "",
       ssh_user: "pi",
     },
+    sudo_password: "",
     created: null,
     provisionResult: null,
   };
@@ -112,15 +113,29 @@ async function renderWizard(root) {
       <p>Open <a href="https://www.raspberrypi.com/software/" target="_blank" rel="noopener">Raspberry Pi Imager</a> and choose <strong>Raspberry Pi OS Lite</strong>. Click the gear / "OS customisation" panel and set:</p>
       <ul>
         <li>Hostname: <code>${escapeHtml(hostname)}</code></li>
+        <li>Username: <code>${escapeHtml(state.form.ssh_user || "pi")}</code> (must match — pick any password Imager forces you to set)</li>
         <li>Wi-Fi: SSID, password, country</li>
         <li>SSH: enabled, <strong>public-key only</strong>, with the key below</li>
+        <li>Skip "Raspberry Pi Connect" — not needed</li>
       </ul>
       <p>Public key for this Pi:</p>
       <code class="code-block">${escapeHtml(state.created?.public_key)}</code>
       <p>Flash the SD card, insert it into the Pi, and power it on. Wait 60–90 seconds for first boot to finish.</p>
+      <label>Pi user password
+        <input id="f-sudo-pw" type="password" autocomplete="new-password" placeholder="The password you set in Imager" />
+        <small>Used once over SSH to enable unattended sudo for <code>${escapeHtml(state.form.ssh_user || "pi")}</code>, then dropped from memory. Never persisted.</small>
+      </label>
       <button type="button" id="continue">I've powered the Pi on — provision now</button>
+      <p id="step2-error" class="status-failed"></p>
     `;
     document.getElementById("continue").addEventListener("click", async () => {
+      const sudoPassword = document.getElementById("f-sudo-pw").value;
+      const errorEl = document.getElementById("step2-error");
+      if (!sudoPassword) {
+        errorEl.textContent = "Enter the Pi user password (the one you set in Imager).";
+        return;
+      }
+      state.sudo_password = sudoPassword;
       state.step = 3;
       renderStep();
       await provision({ ip_fallback: null });
@@ -132,7 +147,10 @@ async function renderWizard(root) {
     try {
       const result = await api.fetchJson(`/api/agents/${encodeURIComponent(state.created.agent_id)}/provision`, {
         method: "POST",
-        body: JSON.stringify({ ip_fallback: ip_fallback || null }),
+        body: JSON.stringify({
+          ip_fallback: ip_fallback || null,
+          sudo_password: state.sudo_password || null,
+        }),
       });
       state.provisionResult = { ok: true, body: result };
     } catch (error) {
@@ -152,6 +170,8 @@ async function renderWizard(root) {
     const status = document.getElementById("provision-status");
     if (state.provisionResult?.ok) {
       const agentId = state.created?.agent_id || state.form.name;
+      // Drop the sudo password from memory once provisioning succeeds.
+      state.sudo_password = "";
       status.innerHTML = `
         <p class="status-online"><strong>Success.</strong> The Pi will check in within 60 seconds.</p>
         <p><a role="button" href="#/cameras/${encodeURIComponent(agentId)}">Open camera</a></p>
@@ -160,11 +180,13 @@ async function renderWizard(root) {
     }
 
     const hostname = effectiveHostname();
+    const errorMessage = state.provisionResult?.message || "";
+    const looksLikeAuthFailure = /password|sudo|permission denied|authentication/i.test(errorMessage);
     status.innerHTML = `
-      <p class="status-failed"><strong>Couldn't reach the Pi.</strong></p>
-      <p class="code-block">${escapeHtml(state.provisionResult?.message)}</p>
-      <details class="troubleshooting" open>
-        <summary>Troubleshooting</summary>
+      <p class="status-failed"><strong>Couldn't finish provisioning.</strong></p>
+      <p class="code-block">${escapeHtml(errorMessage)}</p>
+      <details class="troubleshooting" ${looksLikeAuthFailure ? "" : "open"}>
+        <summary>Network troubleshooting</summary>
         <ul>
           <li>Wait 60–90 seconds after first boot — the Pi may still be configuring Wi-Fi.</li>
           <li>Confirm the Pi has power and (if it has one) the activity LED has settled.</li>
@@ -174,7 +196,11 @@ async function renderWizard(root) {
         </ul>
         <p>If <code>${escapeHtml(hostname)}.local</code> doesn't resolve on your network, find the Pi's IP in your router's DHCP table and enter it below to retry.</p>
       </details>
-      <label>Pi IP address
+      <label>Pi user password
+        <input id="retry-sudo-pw" type="password" autocomplete="new-password" placeholder="${state.sudo_password ? "•••••• (re-enter to change)" : "The password you set in Imager"}" />
+        <small>Re-enter only if you mistyped earlier. Otherwise leave blank to reuse.</small>
+      </label>
+      <label>Pi IP address (optional)
         <input id="retry-ip" placeholder="192.168.1.50" />
       </label>
       <button type="button" id="retry">Retry provision</button>
@@ -182,9 +208,13 @@ async function renderWizard(root) {
     `;
     document.getElementById("retry").addEventListener("click", async () => {
       const ip = document.getElementById("retry-ip").value.trim();
+      const pw = document.getElementById("retry-sudo-pw").value;
+      if (pw) state.sudo_password = pw;
       await provision({ ip_fallback: ip || null });
     });
     document.getElementById("retry-hostname").addEventListener("click", async () => {
+      const pw = document.getElementById("retry-sudo-pw").value;
+      if (pw) state.sudo_password = pw;
       await provision({ ip_fallback: null });
     });
   }

@@ -50,3 +50,64 @@ def test_script_rejects_dangerous_input():
             server_url="http://ok:8080;rm -rf /",
             agent_version="0.3.0",
         )
+
+
+def test_script_omits_sudo_bootstrap_when_no_password():
+    script = build_install_script(
+        camera_id="x",
+        server_url="http://x:8080",
+        agent_version="0.3.0",
+    )
+    assert "NOPASSWD_EOF" not in script
+    assert "010_timelapse-nopasswd" not in script
+
+
+def test_script_includes_sudo_bootstrap_when_password_present():
+    script = build_install_script(
+        camera_id="x",
+        server_url="http://x:8080",
+        agent_version="0.3.0",
+        ssh_user="pi",
+        sudo_password="hunter2",
+    )
+    assert "SUDO_PASSWORD='hunter2'" in script
+    assert "sudo -S -p ''" in script
+    assert "NOPASSWD_EOF" in script
+    assert "pi ALL=(ALL) NOPASSWD:ALL" in script
+    assert "/etc/sudoers.d/010_timelapse-nopasswd" in script
+    # Bootstrap must come before any non-bootstrap sudo so apt-get can run unattended.
+    assert script.index("NOPASSWD_EOF") < script.index("sudo apt-get update")
+
+
+def test_script_escapes_single_quote_in_password():
+    script = build_install_script(
+        camera_id="x",
+        server_url="http://x:8080",
+        agent_version="0.3.0",
+        ssh_user="pi",
+        sudo_password="it's-a-secret",
+    )
+    # Standard POSIX trick: end the literal, append escaped quote, restart literal.
+    assert "SUDO_PASSWORD='it'\\''s-a-secret'" in script
+
+
+def test_script_rejects_password_with_newline():
+    import pytest
+    with pytest.raises(ValueError, match="newlines"):
+        build_install_script(
+            camera_id="x",
+            server_url="http://x:8080",
+            agent_version="0.3.0",
+            sudo_password="line1\nline2",
+        )
+
+
+def test_script_rejects_invalid_ssh_user():
+    import pytest
+    with pytest.raises(ValueError, match="ssh_user"):
+        build_install_script(
+            camera_id="x",
+            server_url="http://x:8080",
+            agent_version="0.3.0",
+            ssh_user="root; rm -rf /",
+        )
