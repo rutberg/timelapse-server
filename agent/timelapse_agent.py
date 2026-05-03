@@ -93,6 +93,48 @@ def verify_sha256(path: Path, expected_hex: str) -> None:
         raise UpdateError(f"sha256 mismatch: expected {expected_hex}, got {actual}")
 
 
+def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
+    dest_resolved = dest.resolve()
+    for member in tar.getmembers():
+        member_path = (dest / member.name).resolve()
+        try:
+            member_path.relative_to(dest_resolved)
+        except ValueError as error:
+            raise UpdateError(f"unsafe path in bundle: {member.name}") from error
+        if member.issym() or member.islnk():
+            raise UpdateError(f"unsafe symlink in bundle: {member.name}")
+    tar.extractall(dest)
+
+
+def install_bundle(bundle_path: Path, version: str, install_root: Path) -> Path:
+    install_root.mkdir(parents=True, exist_ok=True)
+    staging = install_root / f".{version}.staging"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
+    try:
+        with tarfile.open(bundle_path, "r:gz") as tar:
+            _safe_extract(tar, staging)
+        extracted = list(staging.iterdir())
+        if len(extracted) != 1 or not extracted[0].is_dir():
+            raise UpdateError("bundle must contain exactly one top-level directory")
+        version_dir = install_root / version
+        if version_dir.exists():
+            shutil.rmtree(version_dir)
+        extracted[0].rename(version_dir)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+    current_link = install_root / "current"
+    new_link = install_root / ".current.new"
+    if new_link.exists() or new_link.is_symlink():
+        new_link.unlink()
+    new_link.symlink_to(version_dir)
+    new_link.replace(current_link)
+    return version_dir
+
+
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/checkin"
     payload = {
