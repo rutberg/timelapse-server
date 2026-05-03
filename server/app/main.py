@@ -13,12 +13,14 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 
 app = FastAPI(title="Hydroponic Timelapse Server")
 
 DATA_DIR = Path(os.environ.get("TIMELAPSE_DATA_DIR", "./data")).resolve()
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 STORE_PATH = DATA_DIR / "config.json"
 VALID_CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 DEFAULT_ALLOWED_NETWORKS = (
@@ -283,6 +285,14 @@ async def lan_only_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+
 @app.get("/api/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -452,3 +462,19 @@ def read_video(
     if path.suffix != ".mp4" or not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
     return FileResponse(path, media_type="video/mp4")
+
+
+@app.api_route(
+    "/api/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    include_in_schema=False,
+)
+def api_not_found(path: str) -> None:
+    raise HTTPException(status_code=404)
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def spa_fallback(path: str) -> FileResponse:
+    if path.startswith("api/") or path.startswith("static/"):
+        raise HTTPException(status_code=404)
+    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
