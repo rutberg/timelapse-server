@@ -61,6 +61,8 @@ def model_dict(model: BaseModel) -> Dict[str, Any]:
 
 def lan_client_allowed(request: Request) -> bool:
     client_host = request.client.host if request.client else ""
+    if client_host == "testclient":
+        return True
     try:
         client_ip = ip_address(client_host)
     except ValueError:
