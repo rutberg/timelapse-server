@@ -1,0 +1,16 @@
+[Unit]
+Description=Hydroponic timelapse server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/timelapse/server
+Environment=TIMELAPSE_DATA_DIR=/srv/timelapse
+Environment=TIMELAPSE_ALLOWED_NETWORKS=127.0.0.0/8,192.168.68.0/22
+ExecStart=/opt/timelapse/server/.venv/bin/uvicorn app.main:app --host 192.168.68.52 --port 8080
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

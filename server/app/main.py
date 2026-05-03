@@ -1,0 +1,340 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from ipaddress import ip_address, ip_network
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
+
+
+app = FastAPI(title="Hydroponic Timelapse Server")
+
+DATA_DIR = Path(os.environ.get("TIMELAPSE_DATA_DIR", "./data")).resolve()
+STORE_PATH = DATA_DIR / "config.json"
+IDENTIFIER_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+DEFAULT_ALLOWED_NETWORKS = (
+    "127.0.0.0/8,"
+    "10.0.0.0/8,"
+    "172.16.0.0/12,"
+    "192.168.0.0/16,"
+    "::1/128,"
+    "fc00::/7,"
+    "fe80::/10"
+)
+ALLOWED_NETWORKS = [
+    ip_network(value.strip())
+    for value in os.environ.get("TIMELAPSE_ALLOWED_NETWORKS", DEFAULT_ALLOWED_NETWORKS).split(",")
+    if value.strip()
+]
+
+
+class CameraConfig(BaseModel):
+    enabled: bool = True
+    interval_seconds: int = Field(900, ge=30, le=86_400)
+    image_width: Optional[int] = Field(None, ge=320, le=10_000)
+    image_height: Optional[int] = Field(None, ge=240, le=10_000)
+    jpeg_quality: int = Field(85, ge=1, le=100)
+    config_version: int = 1
+
+
+class VideoRequest(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    fps: int = Field(24, ge=1, le=60)
+    name: Optional[str] = None
+
+
+def model_dict(model: BaseModel) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def lan_client_allowed(request: Request) -> bool:
+    client_host = request.client.host if request.client else ""
+    try:
+        client_ip = ip_address(client_host)
+    except ValueError:
+        return False
+    return any(client_ip in network for network in ALLOWED_NETWORKS)
+
+
+def safe_identifier(value: str) -> str:
+    cleaned = IDENTIFIER_RE.sub("-", value).strip(".-_")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Identifier cannot be empty")
+    return cleaned
+
+
+def ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "images").mkdir(exist_ok=True)
+    (DATA_DIR / "videos").mkdir(exist_ok=True)
+
+
+def load_store() -> Dict[str, Any]:
+    ensure_data_dir()
+    if not STORE_PATH.exists():
+        return {"cameras": {}}
+    with STORE_PATH.open("r", encoding="utf-8") as store_file:
+        return json.load(store_file)
+
+
+def save_store(store: Dict[str, Any]) -> None:
+    ensure_data_dir()
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(DATA_DIR),
+        delete=False,
+    ) as temp_file:
+        json.dump(store, temp_file, indent=2, sort_keys=True)
+        temp_file.write("\n")
+        temp_path = Path(temp_file.name)
+    temp_path.replace(STORE_PATH)
+
+
+def get_camera_config(camera_id: str) -> CameraConfig:
+    camera_id = safe_identifier(camera_id)
+    store = load_store()
+    cameras = store.setdefault("cameras", {})
+    if camera_id not in cameras:
+        cameras[camera_id] = model_dict(CameraConfig())
+        save_store(store)
+    return CameraConfig(**cameras[camera_id])
+
+
+def set_camera_config(camera_id: str, config: CameraConfig) -> CameraConfig:
+    camera_id = safe_identifier(camera_id)
+    store = load_store()
+    cameras = store.setdefault("cameras", {})
+    previous_version = int(cameras.get(camera_id, {}).get("config_version", 0))
+    data = model_dict(config)
+    data["config_version"] = previous_version + 1
+    cameras[camera_id] = data
+    save_store(store)
+    return CameraConfig(**data)
+
+
+def parse_capture_time(value: Optional[str]) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def image_path(camera_id: str, captured_at: datetime) -> Path:
+    day = captured_at.strftime("%Y-%m-%d")
+    timestamp = captured_at.strftime("%Y%m%dT%H%M%SZ")
+    directory = DATA_DIR / "images" / camera_id / day
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / f"{timestamp}.jpg"
+    suffix = 1
+    while candidate.exists():
+        candidate = directory / f"{timestamp}-{suffix}.jpg"
+        suffix += 1
+    return candidate
+
+
+def latest_image(camera_id: str) -> Optional[Path]:
+    base = DATA_DIR / "images" / camera_id
+    if not base.exists():
+        return None
+    images = sorted(base.glob("*/*.jpg"))
+    if not images:
+        return None
+    return images[-1]
+
+
+def list_camera_images(camera_id: str) -> List[Path]:
+    base = DATA_DIR / "images" / camera_id
+    if not base.exists():
+        return []
+    return sorted(base.glob("*/*.jpg"))
+
+
+def camera_summary(camera_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    images = list_camera_images(camera_id)
+    latest = images[-1] if images else None
+    return {
+        "camera_id": camera_id,
+        "config": config,
+        "image_count": len(images),
+        "latest_image": str(latest.relative_to(DATA_DIR)) if latest else None,
+    }
+
+
+def selected_images(camera_id: str, request: VideoRequest) -> List[Path]:
+    images = list_camera_images(camera_id)
+    if not request.start_date and not request.end_date:
+        return images
+    selected = []
+    for path in images:
+        day = path.parent.name
+        if request.start_date and day < request.start_date:
+            continue
+        if request.end_date and day > request.end_date:
+            continue
+        selected.append(path)
+    return selected
+
+
+def ffmpeg_escape(path: Path) -> str:
+    return str(path.resolve()).replace("'", "'\\''")
+
+
+@app.middleware("http")
+async def lan_only_middleware(request: Request, call_next):
+    if not lan_client_allowed(request):
+        return JSONResponse({"detail": "LAN access only"}, status_code=403)
+    return await call_next(request)
+
+
+@app.get("/api/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/api/cameras")
+def list_cameras() -> Dict[str, Any]:
+    store = load_store()
+    cameras = store.setdefault("cameras", {})
+    return {
+        "cameras": [
+            camera_summary(camera_id, config)
+            for camera_id, config in sorted(cameras.items())
+        ]
+    }
+
+
+@app.get("/api/cameras/{camera_id}/config")
+def read_config(
+    camera_id: str,
+) -> CameraConfig:
+    return get_camera_config(camera_id)
+
+
+@app.put("/api/cameras/{camera_id}/config")
+def update_config(
+    camera_id: str,
+    config: CameraConfig,
+) -> CameraConfig:
+    return set_camera_config(camera_id, config)
+
+
+@app.post("/api/cameras/{camera_id}/upload")
+async def upload_image(
+    camera_id: str,
+    image: UploadFile = File(...),
+    x_captured_at: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    captured_at = parse_capture_time(x_captured_at)
+    destination = image_path(camera_id, captured_at)
+
+    with destination.open("wb") as output_file:
+        shutil.copyfileobj(image.file, output_file)
+
+    return {
+        "stored": True,
+        "camera_id": camera_id,
+        "path": str(destination.relative_to(DATA_DIR)),
+    }
+
+
+@app.get("/api/cameras/{camera_id}/latest")
+def read_latest_image(
+    camera_id: str,
+) -> FileResponse:
+    camera_id = safe_identifier(camera_id)
+    latest = latest_image(camera_id)
+    if not latest:
+        raise HTTPException(status_code=404, detail="No images uploaded yet")
+    return FileResponse(latest, media_type="image/jpeg")
+
+
+@app.post("/api/cameras/{camera_id}/videos")
+def generate_video(
+    camera_id: str,
+    request: VideoRequest,
+) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    images = selected_images(camera_id, request)
+    if not images:
+        raise HTTPException(status_code=404, detail="No images found for selection")
+
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(status_code=500, detail="ffmpeg is not installed")
+
+    video_dir = DATA_DIR / "videos" / camera_id
+    video_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    requested_name = safe_identifier(request.name) if request.name else f"timelapse-{timestamp}"
+    output_path = video_dir / f"{requested_name}.mp4"
+    list_path = video_dir / f"{requested_name}.txt"
+
+    with list_path.open("w", encoding="utf-8") as list_file:
+        for path in images:
+            list_file.write(f"file '{ffmpeg_escape(path)}'\n")
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-vf",
+        f"fps={request.fps},format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
+    finally:
+        list_path.unlink(missing_ok=True)
+
+    return {
+        "generated": True,
+        "camera_id": camera_id,
+        "image_count": len(images),
+        "path": str(output_path.relative_to(DATA_DIR)),
+    }
+
+
+@app.get("/api/cameras/{camera_id}/videos/{filename}")
+def read_video(
+    camera_id: str,
+    filename: str,
+) -> FileResponse:
+    camera_id = safe_identifier(camera_id)
+    filename = safe_identifier(filename)
+    path = DATA_DIR / "videos" / camera_id / filename
+    if path.suffix != ".mp4" or not path.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+    return FileResponse(path, media_type="video/mp4")
