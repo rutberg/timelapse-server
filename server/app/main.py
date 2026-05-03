@@ -9,7 +9,7 @@ import tempfile
 from ipaddress import ip_address, ip_network
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -51,6 +51,7 @@ class CameraConfig(BaseModel):
     image_width: Optional[int] = Field(None, ge=320, le=10_000)
     image_height: Optional[int] = Field(None, ge=240, le=10_000)
     jpeg_quality: int = Field(85, ge=1, le=100)
+    desired_agent_version: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9._-]+$")
 
 
 class CameraStatus(BaseModel):
@@ -518,6 +519,51 @@ def post_checkin(
         KeyArchive(DATA_DIR).archive_private_key(camera_id)
 
     return {"acknowledged": True, "last_seen": now_iso}
+
+
+RELEASES_DIR_NAME = "releases"
+
+
+def release_paths(version: str) -> Tuple[Path, Path]:
+    if not re.match(r"^[A-Za-z0-9._-]+$", version):
+        raise HTTPException(status_code=400, detail="Invalid version")
+    bundle = DATA_DIR / RELEASES_DIR_NAME / f"timelapse-agent-{version}.tar.gz"
+    sha = bundle.with_suffix(bundle.suffix + ".sha256")
+    return bundle, sha
+
+
+@app.get("/api/cameras/{camera_id}/update-manifest")
+def get_update_manifest(camera_id: str, request: Request) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    config = get_camera_config(camera_id)
+    desired = config.desired_agent_version
+    if not desired:
+        raise HTTPException(status_code=404, detail="No desired agent version configured")
+    bundle, sha = release_paths(desired)
+    if not bundle.exists() or not sha.exists():
+        raise HTTPException(status_code=503, detail=f"Release {desired} not staged on server")
+    base_url = str(request.base_url).rstrip("/")
+    return {
+        "version": desired,
+        "url": f"{base_url}/api/releases/timelapse-agent-{desired}.tar.gz",
+        "sha256": sha.read_text(encoding="utf-8").strip(),
+    }
+
+
+RELEASE_FILENAME_RE = re.compile(r"^timelapse-agent-[A-Za-z0-9._-]+\.tar\.gz$")
+
+
+@app.get("/api/releases/{filename}")
+def serve_release(filename: str) -> FileResponse:
+    if not RELEASE_FILENAME_RE.match(filename):
+        raise HTTPException(status_code=400, detail="Invalid release filename")
+    path = (DATA_DIR / RELEASES_DIR_NAME / filename).resolve()
+    releases_root = (DATA_DIR / RELEASES_DIR_NAME).resolve()
+    if not str(path).startswith(str(releases_root) + os.sep) and path != releases_root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Release not found")
+    return FileResponse(path, media_type="application/gzip", filename=filename)
 
 
 @app.post("/api/cameras/{camera_id}/upload")

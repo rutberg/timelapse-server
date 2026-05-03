@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import mimetypes
@@ -10,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -20,7 +22,23 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-AGENT_VERSION = "0.3.0"
+def _read_agent_version() -> str:
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "VERSION",
+        here.parent / "VERSION",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8").strip()
+    return "0.0.0-dev"
+
+
+AGENT_VERSION = _read_agent_version()
+
+
+class UpdateError(RuntimeError):
+    pass
 
 
 DEFAULT_REMOTE_CONFIG = {
@@ -70,6 +88,113 @@ def post_json(url: str, payload: Dict[str, Any], timeout: int = 15) -> Dict[str,
     )
     with urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def download_bundle(url: str, dest_dir: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / Path(url).name
+    request = Request(url, method="GET")
+    with urlopen(request, timeout=120) as response:
+        target.write_bytes(response.read())
+    return target
+
+
+def verify_sha256(path: Path, expected_hex: str) -> None:
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual.lower() != expected_hex.lower():
+        raise UpdateError(f"sha256 mismatch: expected {expected_hex}, got {actual}")
+
+
+def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
+    dest_resolved = dest.resolve()
+    for member in tar.getmembers():
+        member_path = (dest / member.name).resolve()
+        try:
+            member_path.relative_to(dest_resolved)
+        except ValueError as error:
+            raise UpdateError(f"unsafe path in bundle: {member.name}") from error
+        if member.issym() or member.islnk():
+            raise UpdateError(f"unsafe symlink in bundle: {member.name}")
+    tar.extractall(dest)
+
+
+def install_bundle(bundle_path: Path, version: str, install_root: Path) -> Path:
+    install_root.mkdir(parents=True, exist_ok=True)
+    staging = install_root / f".{version}.staging"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
+    try:
+        with tarfile.open(bundle_path, "r:gz") as tar:
+            _safe_extract(tar, staging)
+        extracted = list(staging.iterdir())
+        if len(extracted) != 1 or not extracted[0].is_dir():
+            raise UpdateError("bundle must contain exactly one top-level directory")
+        version_dir = install_root / version
+        if version_dir.exists():
+            shutil.rmtree(version_dir)
+        extracted[0].rename(version_dir)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+    current_link = install_root / "current"
+    new_link = install_root / ".current.new"
+    if new_link.exists() or new_link.is_symlink():
+        new_link.unlink()
+    new_link.symlink_to(version_dir)
+    new_link.replace(current_link)
+    return version_dir
+
+
+DEFAULT_INSTALL_ROOT = Path("/opt/timelapse-agent")
+
+
+def check_for_update(
+    settings: Dict[str, Any],
+    install_root: Path = DEFAULT_INSTALL_ROOT,
+    work_dir: Optional[Path] = None,
+) -> bool:
+    work_dir = work_dir or Path(settings.get("work_dir", "/var/lib/timelapse-agent"))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    download_dir = work_dir / "updates"
+
+    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/update-manifest"
+    try:
+        manifest = request_json(url, timeout=15)
+    except HTTPError as error:
+        if error.code in (404, 503):
+            return False
+        logging.warning("Update manifest fetch failed: %s", error)
+        return False
+    except (URLError, TimeoutError, json.JSONDecodeError) as error:
+        logging.warning("Update manifest fetch failed: %s", error)
+        return False
+
+    desired = manifest.get("version")
+    bundle_url = manifest.get("url")
+    sha = manifest.get("sha256")
+    if not desired or not bundle_url or not sha:
+        return False
+    if desired == AGENT_VERSION:
+        return False
+
+    logging.info("Update available: %s -> %s", AGENT_VERSION, desired)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        bundle_path = download_bundle(bundle_url, download_dir)
+        verify_sha256(bundle_path, sha)
+        install_bundle(bundle_path, desired, install_root)
+    except UpdateError as error:
+        logging.error("Update failed: %s", error)
+        return False
+    finally:
+        if download_dir.exists():
+            for stale in download_dir.glob("*.tar.gz"):
+                stale.unlink(missing_ok=True)
+
+    logging.info("Update installed; exiting for systemd to restart on new version")
+    return True
 
 
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
@@ -256,6 +381,9 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
             post_checkin(settings, state)
+            if check_for_update(settings):
+                logging.info("Exiting to allow systemd restart")
+                return
             next_config_poll = now + poll_seconds
 
         upload_pending(settings, work_dir, state)
