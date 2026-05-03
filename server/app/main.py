@@ -60,6 +60,14 @@ class CameraRecord(BaseModel):
     status: CameraStatus = Field(default_factory=CameraStatus)
 
 
+class CheckinRequest(BaseModel):
+    agent_version: Optional[str] = None
+    hostname: Optional[str] = None
+    last_capture_at: Optional[str] = None
+    last_upload_at: Optional[str] = None
+    last_error: Optional[str] = None
+
+
 class VideoRequest(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -282,6 +290,36 @@ def update_config(
     config: CameraConfig,
 ) -> CameraConfig:
     return set_camera_config(camera_id, config)
+
+
+@app.post("/api/cameras/{camera_id}/checkin")
+def post_checkin(
+    camera_id: str,
+    payload: CheckinRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    store = load_store()
+    cameras = store.setdefault("cameras", {})
+    record = cameras.get(camera_id) or model_dict(CameraRecord())
+
+    status = record.setdefault("status", model_dict(CameraStatus()))
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    status["last_seen"] = now_iso
+    status["source_ip"] = request.client.host if request.client else None
+    if payload.agent_version is not None:
+        status["agent_version"] = payload.agent_version
+    if payload.hostname is not None:
+        status["hostname"] = payload.hostname
+    if payload.last_capture_at is not None:
+        status["last_capture_at"] = payload.last_capture_at
+    if payload.last_upload_at is not None:
+        status["last_upload_at"] = payload.last_upload_at
+    status["last_error"] = payload.last_error
+
+    cameras[camera_id] = record
+    save_store(store)
+    return {"acknowledged": True, "last_seen": now_iso}
 
 
 @app.post("/api/cameras/{camera_id}/upload")
