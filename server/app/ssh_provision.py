@@ -33,6 +33,14 @@ def resolve_target(expected_hostname: str, ip_fallback: Optional[str]) -> Provis
     )
 
 
+def _quoted_known_hosts(known_hosts_path: Path) -> str:
+    # OpenSSH parses UserKnownHostsFile as a space-separated list of paths.
+    # Wrap in double quotes so paths containing spaces (e.g. "Local Projects")
+    # stay a single value. Backslash-escape any embedded double quotes.
+    safe = str(known_hosts_path).replace("\\", "\\\\").replace('"', '\\"')
+    return f'UserKnownHostsFile="{safe}"'
+
+
 def _ssh_base_args(
     ssh_user: str,
     private_key_path: Path,
@@ -45,7 +53,7 @@ def _ssh_base_args(
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
         "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"UserKnownHostsFile={known_hosts_path}",
+        "-o", _quoted_known_hosts(known_hosts_path),
         f"{ssh_user}@{host}",
     ]
 
@@ -64,7 +72,7 @@ def _scp_base_args(
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
         "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"UserKnownHostsFile={known_hosts_path}",
+        "-o", _quoted_known_hosts(known_hosts_path),
         *[str(src) for src in sources],
         f"{ssh_user}@{host}:{destination}",
     ]
