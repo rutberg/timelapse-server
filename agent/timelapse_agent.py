@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import mimetypes
@@ -10,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -21,6 +23,10 @@ from urllib.request import Request, urlopen
 
 
 AGENT_VERSION = "0.3.0"
+
+
+class UpdateError(RuntimeError):
+    pass
 
 
 DEFAULT_REMOTE_CONFIG = {
@@ -70,6 +76,21 @@ def post_json(url: str, payload: Dict[str, Any], timeout: int = 15) -> Dict[str,
     )
     with urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def download_bundle(url: str, dest_dir: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / Path(url).name
+    request = Request(url, method="GET")
+    with urlopen(request, timeout=120) as response:
+        target.write_bytes(response.read())
+    return target
+
+
+def verify_sha256(path: Path, expected_hex: str) -> None:
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual.lower() != expected_hex.lower():
+        raise UpdateError(f"sha256 mismatch: expected {expected_hex}, got {actual}")
 
 
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
