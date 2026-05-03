@@ -606,7 +606,7 @@ def get_update_manifest(camera_id: str, request: Request) -> Dict[str, Any]:
     bundle, sha = release_paths(desired)
     if not bundle.exists() or not sha.exists():
         raise HTTPException(status_code=503, detail=f"Release {desired} not staged on server")
-    base_url = str(request.base_url).rstrip("/")
+    base_url = resolve_public_server_url(str(request.base_url).rstrip("/"))
     return {
         "version": desired,
         "url": f"{base_url}/api/releases/timelapse-agent-{desired}.tar.gz",
