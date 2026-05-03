@@ -53,12 +53,6 @@ async function render() {
 
 window.addEventListener("hashchange", render);
 
-await Promise.all([
-  import("/static/views/dashboard.js"),
-  import("/static/views/create-agent.js"),
-  import("/static/views/camera.js"),
-]);
-
 function highlightActive() {
   const hash = window.location.hash || "#/dashboard";
   document.querySelectorAll("nav a").forEach((link) => {
@@ -76,4 +70,14 @@ highlightActive();
 if (!window.location.hash) {
   window.location.hash = "#/dashboard";
 }
-render();
+
+Promise.all([
+  import("/static/views/dashboard.js"),
+  import("/static/views/create-agent.js"),
+  import("/static/views/camera.js"),
+])
+  .then(render)
+  .catch((error) => {
+    const root = document.getElementById("app-root");
+    if (root) showError(root, error);
+  });

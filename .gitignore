@@ -15,3 +15,6 @@ venv.bak/
 .worktrees/
 .venv-dev/
 dist/
+dev-data/
+.dev-server.pid
+.dev-server.log
