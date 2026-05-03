@@ -16,9 +16,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.agents import AgentStore, PendingAgent
+from app.provision_script import build_install_script
+from app.ssh_keys import generate_keypair, read_public_key
+from app.ssh_provision import ProvisionError, resolve_target, run_provision
+
 
 app = FastAPI(title="Hydroponic Timelapse Server")
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("TIMELAPSE_DATA_DIR", "./data")).resolve()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STORE_PATH = DATA_DIR / "config.json"
@@ -68,6 +74,43 @@ class CheckinRequest(BaseModel):
     last_capture_at: Optional[str] = None
     last_upload_at: Optional[str] = None
     last_error: Optional[str] = None
+
+
+HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
+
+
+class CreateAgentRequest(BaseModel):
+    agent_id: str
+    display_name: str
+    expected_hostname: str
+    ip_fallback: Optional[str] = None
+    ssh_user: str = "pi"
+
+
+class ProvisionRequest(BaseModel):
+    ip_fallback: Optional[str] = None
+
+
+def validate_hostname(value: str) -> str:
+    if not HOSTNAME_RE.match(value):
+        raise HTTPException(status_code=400, detail="Invalid hostname")
+    return value
+
+
+def validate_ip(value: Optional[str]) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    try:
+        ip_address(value)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid IP address") from error
+    return value
+
+
+def validate_ssh_user(value: str) -> str:
+    if not re.match(r"^[a-z_][a-z0-9_-]{0,30}$", value):
+        raise HTTPException(status_code=400, detail="Invalid SSH user")
+    return value
 
 
 class VideoRequest(BaseModel):
@@ -298,6 +341,119 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+def agent_store() -> AgentStore:
+    return AgentStore(DATA_DIR)
+
+
+def agent_to_response(agent: PendingAgent, include_public_key: bool = False) -> Dict[str, Any]:
+    body = {
+        "agent_id": agent.agent_id,
+        "display_name": agent.display_name,
+        "expected_hostname": agent.expected_hostname,
+        "ip_fallback": agent.ip_fallback,
+        "ssh_user": agent.ssh_user,
+        "status": agent.status,
+        "created_at": agent.created_at,
+        "last_provision_attempt_at": agent.last_provision_attempt_at,
+        "last_provision_error": agent.last_provision_error,
+    }
+    if include_public_key:
+        public_path = DATA_DIR / "agents" / agent.agent_id / "id_ed25519.pub"
+        if public_path.exists():
+            body["public_key"] = read_public_key(public_path)
+    return body
+
+
+@app.post("/api/agents", status_code=201)
+def create_agent(payload: CreateAgentRequest) -> Dict[str, Any]:
+    agent_id = safe_identifier(payload.agent_id)
+    expected_hostname = validate_hostname(payload.expected_hostname)
+    ip_fallback = validate_ip(payload.ip_fallback)
+    ssh_user = validate_ssh_user(payload.ssh_user)
+
+    store = agent_store()
+    try:
+        agent = store.create(
+            agent_id=agent_id,
+            display_name=payload.display_name,
+            expected_hostname=expected_hostname,
+            ip_fallback=ip_fallback,
+            ssh_user=ssh_user,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    generate_keypair(
+        DATA_DIR / "agents" / agent_id,
+        comment=f"timelapse-agent-{agent_id}",
+    )
+    return agent_to_response(agent, include_public_key=True)
+
+
+@app.get("/api/agents")
+def list_agents() -> Dict[str, Any]:
+    return {"agents": [agent_to_response(agent) for agent in agent_store().list()]}
+
+
+@app.get("/api/agents/{agent_id}")
+def read_agent(agent_id: str) -> Dict[str, Any]:
+    agent_id = safe_identifier(agent_id)
+    try:
+        agent = agent_store().get(agent_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Agent not found") from error
+    return agent_to_response(agent, include_public_key=True)
+
+
+@app.post("/api/agents/{agent_id}/provision")
+def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) -> Dict[str, Any]:
+    agent_id = safe_identifier(agent_id)
+    store = agent_store()
+    try:
+        agent = store.get(agent_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Agent not found") from error
+
+    if payload.ip_fallback is not None:
+        ip_fallback = validate_ip(payload.ip_fallback)
+        agent.ip_fallback = ip_fallback
+        store._write(agent)  # type: ignore[attr-defined]
+
+    store.update_status(agent_id, status="provisioning", last_provision_error=None)
+
+    server_url = str(request.base_url).rstrip("/")
+    agent_dir = DATA_DIR / "agents" / agent_id
+    private_key_path = agent_dir / "id_ed25519"
+    known_hosts_path = agent_dir / "known_hosts"
+
+    try:
+        target = resolve_target(agent.expected_hostname, agent.ip_fallback)
+        from timelapse_agent import AGENT_VERSION  # noqa: WPS433
+        install_script = build_install_script(
+            camera_id=agent_id,
+            server_url=server_url,
+            agent_version=AGENT_VERSION,
+        )
+        payload_files = {
+            "timelapse_agent.py": REPO_ROOT / "agent" / "timelapse_agent.py",
+            "timelapse-agent.service": REPO_ROOT / "agent" / "systemd" / "timelapse-agent.service",
+        }
+        run_provision(
+            target=target,
+            ssh_user=agent.ssh_user,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            install_script=install_script,
+            payload_files=payload_files,
+        )
+    except ProvisionError as error:
+        store.update_status(agent_id, status="failed", last_provision_error=str(error))
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    store.update_status(agent_id, status="provisioned", last_provision_error=None)
+    return agent_to_response(store.get(agent_id), include_public_key=False)
+
+
 @app.get("/api/cameras")
 def list_cameras() -> Dict[str, Any]:
     store = load_store()
@@ -352,6 +508,15 @@ def post_checkin(
 
     cameras[camera_id] = record
     save_store(store)
+
+    try:
+        agent = agent_store().get(camera_id)
+    except KeyError:
+        agent = None
+    if agent is not None and agent.status == "provisioned":
+        from app.agents import KeyArchive
+        KeyArchive(DATA_DIR).archive_private_key(camera_id)
+
     return {"acknowledged": True, "last_seen": now_iso}
 
 

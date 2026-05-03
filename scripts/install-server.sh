@@ -40,7 +40,7 @@ PORT="${TIMELAPSE_PORT:-8080}"
 REPO_URL="${TIMELAPSE_REPO_URL:-}"
 
 apt-get update
-apt-get install -y ca-certificates curl ffmpeg git iproute2 python3 python3-venv
+apt-get install -y ca-certificates curl ffmpeg git iproute2 openssh-client python3 python3-venv
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" pull --ff-only
