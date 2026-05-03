@@ -24,6 +24,16 @@ The system is designed for local network operations where the capture device (ag
 
 The server is designed to run on a Debian-based system (e.g., a Debian LXC, Ubuntu VM, or a dedicated server).
 
+### Web UI
+
+After install, browse to `http://<SERVER_IP>:<PORT>/` from any LAN host. The UI provides:
+
+- **Cameras** - auto-refreshing status tiles for every camera that has checked in.
+- **Add agent** - three-step wizard (form -> flash with Imager -> SSH provision) backed by `/api/agents`.
+- **Camera detail** - capture settings, latest image preview, video render button, and `desired_agent_version` for rolling out updates.
+
+The UI is served from `/static/` and uses Alpine.js + pico.css. Both are vendored, so the LXC works offline.
+
 ### Automated Installation
 
 On a fresh Debian installation, you can install the server with a single command:
