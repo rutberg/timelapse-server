@@ -16,11 +16,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from app.agents import AgentStore, PendingAgent
+from app.provision_script import build_install_script
 from app.ssh_keys import generate_keypair, read_public_key
+from app.ssh_provision import ProvisionError, resolve_target, run_provision
 
 
 app = FastAPI(title="Hydroponic Timelapse Server")
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("TIMELAPSE_DATA_DIR", "./data")).resolve()
 STORE_PATH = DATA_DIR / "config.json"
 VALID_CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
@@ -80,6 +83,10 @@ class CreateAgentRequest(BaseModel):
     expected_hostname: str
     ip_fallback: Optional[str] = None
     ssh_user: str = "pi"
+
+
+class ProvisionRequest(BaseModel):
+    ip_fallback: Optional[str] = None
 
 
 def validate_hostname(value: str) -> str:
@@ -386,6 +393,55 @@ def read_agent(agent_id: str) -> Dict[str, Any]:
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Agent not found") from error
     return agent_to_response(agent, include_public_key=True)
+
+
+@app.post("/api/agents/{agent_id}/provision")
+def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) -> Dict[str, Any]:
+    agent_id = safe_identifier(agent_id)
+    store = agent_store()
+    try:
+        agent = store.get(agent_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Agent not found") from error
+
+    if payload.ip_fallback is not None:
+        ip_fallback = validate_ip(payload.ip_fallback)
+        agent.ip_fallback = ip_fallback
+        store._write(agent)  # type: ignore[attr-defined]
+
+    store.update_status(agent_id, status="provisioning", last_provision_error=None)
+
+    server_url = str(request.base_url).rstrip("/")
+    agent_dir = DATA_DIR / "agents" / agent_id
+    private_key_path = agent_dir / "id_ed25519"
+    known_hosts_path = agent_dir / "known_hosts"
+
+    try:
+        target = resolve_target(agent.expected_hostname, agent.ip_fallback)
+        from timelapse_agent import AGENT_VERSION  # noqa: WPS433
+        install_script = build_install_script(
+            camera_id=agent_id,
+            server_url=server_url,
+            agent_version=AGENT_VERSION,
+        )
+        payload_files = {
+            "timelapse_agent.py": REPO_ROOT / "agent" / "timelapse_agent.py",
+            "timelapse-agent.service": REPO_ROOT / "agent" / "systemd" / "timelapse-agent.service",
+        }
+        run_provision(
+            target=target,
+            ssh_user=agent.ssh_user,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            install_script=install_script,
+            payload_files=payload_files,
+        )
+    except ProvisionError as error:
+        store.update_status(agent_id, status="failed", last_provision_error=str(error))
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    store.update_status(agent_id, status="provisioned", last_provision_error=None)
+    return agent_to_response(store.get(agent_id), include_public_key=False)
 
 
 @app.get("/api/cameras")
