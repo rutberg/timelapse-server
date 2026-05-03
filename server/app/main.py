@@ -227,13 +227,31 @@ def list_camera_images(camera_id: str) -> List[Path]:
     return sorted(base.glob("*/*.jpg"))
 
 
+ONLINE_GRACE_SECONDS = 300
+
+
+def is_camera_online(status: Dict[str, Any], poll_seconds: int = 60) -> bool:
+    last_seen = status.get("last_seen")
+    if not last_seen:
+        return False
+    try:
+        seen_at = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    threshold = max(ONLINE_GRACE_SECONDS, poll_seconds * 3)
+    return (datetime.now(timezone.utc) - seen_at).total_seconds() <= threshold
+
+
 def camera_summary(camera_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
     images = list_camera_images(camera_id)
     latest = images[-1] if images else None
+    config = record.get("config", {})
+    status = dict(record.get("status", {}))
+    status["is_online"] = is_camera_online(status)
     return {
         "camera_id": camera_id,
-        "config": record.get("config", {}),
-        "status": record.get("status", {}),
+        "config": config,
+        "status": status,
         "image_count": len(images),
         "latest_image": str(latest.relative_to(DATA_DIR)) if latest else None,
     }
