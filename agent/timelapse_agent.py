@@ -60,6 +60,9 @@ class AgentState:
     pending_bytes: int = 0
 
 
+DEFAULT_MAX_PENDING_BYTES = 500_000_000  # 500 MB
+
+
 def measure_pending(work_dir: Path) -> tuple[int, int]:
     pending_dir = work_dir / "pending"
     if not pending_dir.exists():
@@ -73,6 +76,46 @@ def measure_pending(work_dir: Path) -> tuple[int, int]:
             continue
         count += 1
     return (count, total)
+
+
+def evict_pending(work_dir: Path, max_bytes: int) -> tuple[int, int]:
+    """Delete oldest pending captures until total size <= max_bytes.
+
+    Returns (evicted_count, evicted_bytes). max_bytes <= 0 means no cap
+    (returns 0, 0). Sidecar .json metadata is removed alongside its image.
+    """
+    if max_bytes <= 0:
+        return (0, 0)
+    pending_dir = work_dir / "pending"
+    if not pending_dir.exists():
+        return (0, 0)
+    files = sorted(pending_dir.glob("*.jpg"))
+    sizes = []
+    total = 0
+    for path in files:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            sizes.append(0)
+            continue
+        sizes.append(size)
+        total += size
+    if total <= max_bytes:
+        return (0, 0)
+    evicted_count = 0
+    evicted_bytes = 0
+    for path, size in zip(files, sizes):
+        if total <= max_bytes:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        path.with_suffix(".json").unlink(missing_ok=True)
+        total -= size
+        evicted_count += 1
+        evicted_bytes += size
+    return (evicted_count, evicted_bytes)
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -380,13 +423,17 @@ def run_agent(settings: Dict[str, Any]) -> None:
     cache_path = work_dir / "server-config.json"
 
     poll_seconds = int(settings.get("config_poll_seconds", 60))
+    max_pending_bytes = int(settings.get("max_pending_bytes", DEFAULT_MAX_PENDING_BYTES))
     state = AgentState()
     remote_config = fetch_remote_config(settings, cache_path)
     last_capture: Optional[float] = None
     next_capture = time.monotonic()
     next_config_poll = time.monotonic() + poll_seconds
 
-    logging.info("Agent v%s started for camera_id=%s", AGENT_VERSION, settings["camera_id"])
+    logging.info(
+        "Agent v%s started for camera_id=%s (max_pending_bytes=%s)",
+        AGENT_VERSION, settings["camera_id"], max_pending_bytes,
+    )
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
     post_checkin(settings, state)
 
@@ -424,7 +471,14 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = now + min(300, interval_seconds)
             else:
                 last_capture = time.monotonic()
+                evicted_count, evicted_bytes = evict_pending(work_dir, max_pending_bytes)
+                if evicted_count:
+                    logging.warning(
+                        "Evicted %d oldest pending captures (%d bytes) to stay under %d-byte cap",
+                        evicted_count, evicted_bytes, max_pending_bytes,
+                    )
                 upload_pending(settings, work_dir, state)
+                state.pending_count, state.pending_bytes = measure_pending(work_dir)
                 next_capture = last_capture + interval_seconds
 
         sleep_until = min(next_capture, next_config_poll)

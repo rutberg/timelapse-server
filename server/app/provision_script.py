@@ -38,6 +38,7 @@ def build_install_script(
             "server_url": server_url,
             "config_poll_seconds": 60,
             "work_dir": "/var/lib/timelapse-agent",
+            "max_pending_bytes": 500_000_000,
         },
         indent=2,
     )

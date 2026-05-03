@@ -79,6 +79,47 @@ def test_measure_pending_returns_zero_when_dir_missing(tmp_path):
     assert total == 0
 
 
+def test_evict_pending_drops_oldest_until_under_cap(tmp_path):
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    # Lexical sort = chronological with our UTC timestamp filename scheme.
+    for index, name in enumerate(["20260501T000000Z.jpg", "20260502T000000Z.jpg", "20260503T000000Z.jpg"]):
+        (pending / name).write_bytes(b"x" * 200)
+        (pending / name.replace(".jpg", ".json")).write_text("{}")
+
+    evicted_count, evicted_bytes = agent.evict_pending(tmp_path, max_bytes=400)
+
+    assert evicted_count == 1
+    assert evicted_bytes == 200
+    remaining = sorted(p.name for p in pending.glob("*.jpg"))
+    assert remaining == ["20260502T000000Z.jpg", "20260503T000000Z.jpg"]
+    # Sidecar of evicted file is also gone.
+    assert not (pending / "20260501T000000Z.json").exists()
+    assert (pending / "20260502T000000Z.json").exists()
+
+
+def test_evict_pending_noop_when_under_cap(tmp_path):
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    (pending / "a.jpg").write_bytes(b"x" * 100)
+
+    evicted_count, evicted_bytes = agent.evict_pending(tmp_path, max_bytes=1000)
+
+    assert (evicted_count, evicted_bytes) == (0, 0)
+    assert (pending / "a.jpg").exists()
+
+
+def test_evict_pending_disabled_when_max_bytes_zero(tmp_path):
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    (pending / "a.jpg").write_bytes(b"x" * 1000)
+
+    evicted_count, _ = agent.evict_pending(tmp_path, max_bytes=0)
+
+    assert evicted_count == 0
+    assert (pending / "a.jpg").exists()
+
+
 def test_post_checkin_swallows_network_errors():
     settings = {"camera_id": "tomatoes", "server_url": "http://nope:8080"}
     state = agent.AgentState()
