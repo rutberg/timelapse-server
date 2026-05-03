@@ -22,7 +22,19 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-AGENT_VERSION = "0.3.0"
+def _read_agent_version() -> str:
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "VERSION",
+        here.parent / "VERSION",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8").strip()
+    return "0.0.0-dev"
+
+
+AGENT_VERSION = _read_agent_version()
 
 
 class UpdateError(RuntimeError):
@@ -133,6 +145,56 @@ def install_bundle(bundle_path: Path, version: str, install_root: Path) -> Path:
     new_link.symlink_to(version_dir)
     new_link.replace(current_link)
     return version_dir
+
+
+DEFAULT_INSTALL_ROOT = Path("/opt/timelapse-agent")
+
+
+def check_for_update(
+    settings: Dict[str, Any],
+    install_root: Path = DEFAULT_INSTALL_ROOT,
+    work_dir: Optional[Path] = None,
+) -> bool:
+    work_dir = work_dir or Path(settings.get("work_dir", "/var/lib/timelapse-agent"))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    download_dir = work_dir / "updates"
+
+    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/update-manifest"
+    try:
+        manifest = request_json(url, timeout=15)
+    except HTTPError as error:
+        if error.code in (404, 503):
+            return False
+        logging.warning("Update manifest fetch failed: %s", error)
+        return False
+    except (URLError, TimeoutError, json.JSONDecodeError) as error:
+        logging.warning("Update manifest fetch failed: %s", error)
+        return False
+
+    desired = manifest.get("version")
+    bundle_url = manifest.get("url")
+    sha = manifest.get("sha256")
+    if not desired or not bundle_url or not sha:
+        return False
+    if desired == AGENT_VERSION:
+        return False
+
+    logging.info("Update available: %s -> %s", AGENT_VERSION, desired)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        bundle_path = download_bundle(bundle_url, download_dir)
+        verify_sha256(bundle_path, sha)
+        install_bundle(bundle_path, desired, install_root)
+    except UpdateError as error:
+        logging.error("Update failed: %s", error)
+        return False
+    finally:
+        if download_dir.exists():
+            for stale in download_dir.glob("*.tar.gz"):
+                stale.unlink(missing_ok=True)
+
+    logging.info("Update installed; exiting for systemd to restart on new version")
+    return True
 
 
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
@@ -319,6 +381,9 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
             post_checkin(settings, state)
+            if check_for_update(settings):
+                logging.info("Exiting to allow systemd restart")
+                return
             next_config_poll = now + poll_seconds
 
         upload_pending(settings, work_dir, state)
