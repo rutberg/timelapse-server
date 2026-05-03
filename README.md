@@ -94,6 +94,16 @@ Use the official **Raspberry Pi Imager** to flash Raspberry Pi OS Lite. In Image
 
 ## Usage & API
 
+### Camera Status
+
+Each agent posts a heartbeat to `POST /api/cameras/<id>/checkin` on every config-poll tick. The server tracks `last_seen`, `agent_version`, `hostname`, and the most recent capture/upload/error. List all cameras with their current status:
+
+```bash
+curl http://<SERVER_IP>:8080/api/cameras
+```
+
+A camera is considered online if its last heartbeat was within five minutes (or three poll intervals, whichever is larger).
+
 ### Setting Camera Configuration
 
 You can change capture settings at any time via the server API. The agent will pick up changes on its next poll.
