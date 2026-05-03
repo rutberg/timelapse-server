@@ -60,7 +60,7 @@ The Pi agent polls this config periodically and adjusts without a restart. `null
 
 ## Pi Agent Quick Start
 
-On Raspberry Pi OS Lite 32-bit, Raspberry Pi OS Lite includes `rpicam-apps-lite` according to Raspberry Pi camera docs. If missing, install it:
+For a fully headless appliance image, use the image patcher below. For manual testing on a running Pi, Raspberry Pi OS Lite 32-bit includes `rpicam-apps-lite` according to Raspberry Pi camera docs. If missing, install it:
 
 ```bash
 sudo apt update
@@ -86,6 +86,44 @@ sudo systemctl enable --now timelapse-agent
 sudo journalctl -u timelapse-agent -f
 ```
 
+## Fully Headless SD Image
+
+This path bakes the Wi-Fi SSID/password, Wi-Fi country, camera ID, and server URL into the image before flashing.
+
+Requirements:
+
+- A Linux machine or VM with `losetup` and `mount`. This will not run directly on macOS without a Linux VM/container with loop-device privileges.
+- An uncompressed Raspberry Pi OS Lite 32-bit `.img`.
+- A 2.4 GHz Wi-Fi network, because Raspberry Pi Zero W does not support 5 GHz Wi-Fi.
+
+Create a private config file:
+
+```bash
+cp image/headless.example.env image/headless.env
+nano image/headless.env
+```
+
+Set at least:
+
+```bash
+TIMELAPSE_CAMERA_ID=tomatoes-zero-w
+TIMELAPSE_SERVER_URL=http://192.168.68.52:8080
+TIMELAPSE_WIFI_SSID=YourWifiName
+TIMELAPSE_WIFI_PSK=YourWifiPassword
+TIMELAPSE_WIFI_COUNTRY=SE
+```
+
+Patch an official Raspberry Pi OS Lite image:
+
+```bash
+sudo image/patch-raspios-image.sh \
+  --image 2026-xx-xx-raspios-bookworm-armhf-lite.img \
+  --config image/headless.env \
+  --output timelapse-tomatoes-zero-w.img
+```
+
+Flash `timelapse-tomatoes-zero-w.img` to the SD card. On first boot, the Pi configures Wi-Fi, removes the temporary Wi-Fi env file, starts the timelapse agent, polls `192.168.68.52`, and begins uploading images.
+
 ## Generate A Video
 
 ```bash
@@ -106,4 +144,4 @@ TIMELAPSE_ALLOWED_NETWORKS="127.0.0.0/8,192.168.68.0/22"
 
 ## Image Build Path
 
-Start with Raspberry Pi OS Lite plus the agent install steps. Once validated, bake the same files and service into a Pi-gen stage to produce a ready-to-burn SD-card image.
+Start with the image patcher above. Once validated, the same files can be moved into a Pi-gen stage if you want a fully reproducible OS build instead of patching an official image.

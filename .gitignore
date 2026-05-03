@@ -12,3 +12,7 @@ venv.bak/
 .vscode/
 *.swp
 *.swo
+image/headless.env
+*.img
+*.img.xz
+*.zip
