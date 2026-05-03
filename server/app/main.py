@@ -498,6 +498,15 @@ def post_checkin(
 
     cameras[camera_id] = record
     save_store(store)
+
+    try:
+        agent = agent_store().get(camera_id)
+    except KeyError:
+        agent = None
+    if agent is not None and agent.status == "provisioned":
+        from app.agents import KeyArchive
+        KeyArchive(DATA_DIR).archive_private_key(camera_id)
+
     return {"acknowledged": True, "last_seen": now_iso}
 
 

@@ -93,3 +93,20 @@ class AgentStore:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(asdict(agent), indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(path)
+
+
+class KeyArchive:
+    def __init__(self, data_dir: Path) -> None:
+        self.root = Path(data_dir) / "agents"
+
+    def archive_private_key(self, agent_id: str) -> bool:
+        agent_dir = self.root / agent_id
+        private_path = agent_dir / "id_ed25519"
+        if not private_path.exists():
+            return False
+        archive_dir = agent_dir / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / "id_ed25519"
+        private_path.replace(target)
+        target.chmod(0o600)
+        return True

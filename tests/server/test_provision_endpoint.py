@@ -69,3 +69,23 @@ def test_provision_accepts_updated_ip_fallback(client, created_agent):
     assert response.status_code == 200
     follow_up = client.get("/api/agents/tomatoes").json()
     assert follow_up["ip_fallback"] == "10.0.0.42"
+
+
+def test_private_key_archived_after_first_checkin(client, created_agent, tmp_data_dir: Path):
+    with patch("app.main.run_provision"), \
+         patch("app.main.resolve_target") as mock_resolve:
+        from app.ssh_provision import ProvisionTarget
+        mock_resolve.return_value = ProvisionTarget(host="x.local", resolved_ip="x")
+        client.post("/api/agents/tomatoes/provision", json={})
+
+    private_path = tmp_data_dir / "agents" / "tomatoes" / "id_ed25519"
+    assert private_path.exists()
+
+    client.post(
+        "/api/cameras/tomatoes/checkin",
+        json={"agent_version": "0.3.0"},
+    )
+
+    assert not private_path.exists()
+    archived = tmp_data_dir / "agents" / "tomatoes" / "archive" / "id_ed25519"
+    assert archived.exists()
