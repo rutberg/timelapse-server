@@ -16,7 +16,7 @@ from urllib.parse import urlparse, urlunparse
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agents import AgentStore, PendingAgent
 from app.provision_script import build_install_script
@@ -61,6 +61,27 @@ class CameraConfig(BaseModel):
             "None = always. Empty list rejected — use enabled=false to pause."
         ),
     )
+    schedule_mode: Optional[str] = Field(
+        default=None,
+        description="One of 'daylight', 'hours', 'scene'. None = legacy/unset.",
+    )
+    schedule_days: Optional[List[int]] = Field(
+        default=None,
+        description="ISO weekdays (1=Mon..7=Sun) on which capture is allowed. None = every day.",
+    )
+    light_threshold: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=255,
+        description="Mean Y luma 0-255. Required when schedule_mode='scene'.",
+    )
+    display_name: Optional[str] = Field(
+        default=None,
+        max_length=120,
+        description="Human-friendly camera label. Falls back to camera_id.",
+    )
+    latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
 
     @field_validator("capture_hours")
     @classmethod
@@ -82,6 +103,46 @@ class CameraConfig(BaseModel):
                 raise ValueError(f"capture_hours has duplicate {hour}")
             seen.add(hour)
         return sorted(seen)
+
+    @field_validator("schedule_mode")
+    @classmethod
+    def _validate_schedule_mode(cls, value):
+        if value is None:
+            return value
+        if value not in ("daylight", "hours", "scene"):
+            raise ValueError(
+                f"schedule_mode must be 'daylight', 'hours', or 'scene'; got {value!r}"
+            )
+        return value
+
+    @field_validator("schedule_days")
+    @classmethod
+    def _validate_schedule_days(cls, value):
+        if value is None:
+            return value
+        seen = set()
+        for day in value:
+            if not isinstance(day, int) or isinstance(day, bool):
+                raise ValueError(f"schedule_days entries must be ISO weekdays 1-7, got {day!r}")
+            if day < 1 or day > 7:
+                raise ValueError(f"schedule_days entries must be 1 (Mon) - 7 (Sun), got {day}")
+            if day in seen:
+                raise ValueError(f"schedule_days has duplicate {day}")
+            seen.add(day)
+        return sorted(seen)
+
+    @model_validator(mode="after")
+    def _enforce_mode_invariants(self):
+        if self.schedule_mode == "hours":
+            if not self.capture_hours:
+                raise ValueError("schedule_mode='hours' requires non-empty capture_hours")
+        elif self.schedule_mode == "daylight":
+            self.capture_hours = None
+        elif self.schedule_mode == "scene":
+            if self.light_threshold is None:
+                raise ValueError("schedule_mode='scene' requires light_threshold")
+            self.capture_hours = None
+        return self
 
 
 class CameraStatus(BaseModel):
