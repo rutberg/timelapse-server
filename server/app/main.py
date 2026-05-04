@@ -225,6 +225,7 @@ class VideoRequest(BaseModel):
     end_date: Optional[str] = None
     fps: int = Field(24, ge=1, le=60)
     name: Optional[str] = None
+    format: str = Field("mp4", pattern=r"^(mp4|gif)$")
 
 
 def model_dict(model: BaseModel) -> Dict[str, Any]:
@@ -843,37 +844,19 @@ def generate_video(
             raise HTTPException(status_code=400, detail=f"Invalid video name: {error.detail}") from error
     else:
         requested_name = f"timelapse-{timestamp}"
-    output_path = video_dir / f"{requested_name}.mp4"
+
+    output_path = video_dir / f"{requested_name}.{request.format}"
     list_path = video_dir / f"{requested_name}.txt"
 
     with list_path.open("w", encoding="utf-8") as list_file:
         for path in images:
             list_file.write(f"file '{ffmpeg_escape(path)}'\n")
 
-    command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-vf",
-        f"fps={request.fps},format=yuv420p",
-        "-c:v",
-        "libx264",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as error:
-        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
+        if request.format == "mp4":
+            run_ffmpeg_mp4(list_path, output_path, request.fps)
+        else:
+            run_ffmpeg_gif(list_path, output_path, request.fps, video_dir, requested_name)
     finally:
         list_path.unlink(missing_ok=True)
 
@@ -883,6 +866,44 @@ def generate_video(
         "image_count": len(images),
         "path": str(output_path.relative_to(DATA_DIR)),
     }
+
+
+def run_ffmpeg_mp4(list_path: Path, output_path: Path, fps: int) -> None:
+    command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-vf", f"fps={fps},format=yuv420p",
+        "-c:v", "libx264", "-movflags", "+faststart",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
+
+
+def run_ffmpeg_gif(list_path: Path, output_path: Path, fps: int, work_dir: Path, base_name: str) -> None:
+    palette_path = work_dir / f"{base_name}-palette.png"
+    palette_command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-vf", f"fps={fps},scale=720:-1:flags=lanczos,palettegen",
+        str(palette_path),
+    ]
+    encode_command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-i", str(palette_path),
+        "-filter_complex", f"fps={fps},scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(palette_command, check=True, capture_output=True, text=True)
+        subprocess.run(encode_command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
+    finally:
+        palette_path.unlink(missing_ok=True)
 
 
 @app.get("/api/cameras/{camera_id}/videos/{filename}")
