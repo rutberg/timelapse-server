@@ -61,10 +61,13 @@ export function mountScheduleControl(host, opts) {
             <div class="lbl">Capture schedule</div>
             <div class="mono small" style="margin-top:2px">${describe(state)}</div>
           </div>
-          <div class="seg" data-mode-seg>
-            <button data-mode="daylight" class="${state.mode === "daylight" ? "active" : ""}">Daylight</button>
-            <button data-mode="hours"    class="${state.mode === "hours"    ? "active" : ""}">Hours</button>
-            <button data-mode="scene"    class="${state.mode === "scene"    ? "active" : ""}">Scene light</button>
+          <div class="row" style="gap:14px">
+            ${renderLightIndicator(state)}
+            <div class="seg" data-mode-seg>
+              <button data-mode="daylight" class="${state.mode === "daylight" ? "active" : ""}">Daylight</button>
+              <button data-mode="hours"    class="${state.mode === "hours"    ? "active" : ""}">Hours</button>
+              <button data-mode="scene"    class="${state.mode === "scene"    ? "active" : ""}">Scene light</button>
+            </div>
           </div>
         </div>
         <div class="card-b">
@@ -145,13 +148,30 @@ export function mountScheduleControl(host, opts) {
     /** Live-update the scene-light reading without resetting other state. */
     setCurrentLight(value) {
       state.currentLight = value;
-      if (state.mode === "scene") render();
+      render();
     },
     getValue() { return serialize(state); },
   };
 }
 
 // ---- Sub-renders -------------------------------------------------------------
+
+function renderLightIndicator(state) {
+  const reading = state.currentLight;
+  const hasReading = reading != null && Number.isFinite(reading);
+  const color = !hasReading
+    ? "var(--soft)"
+    : (state.mode === "scene" && reading >= state.threshold) ? "var(--green)"
+    : (state.mode === "scene" && reading < state.threshold)  ? "var(--soft)"
+    : "var(--ink)";
+  return `
+    <div class="col" style="gap:0;align-items:flex-end" title="Mean Y luminance from the agent's pre-capture frame">
+      <span class="lbl" style="font-size:9px">Scene light</span>
+      <span class="mono" style="font-size:13px;color:${color};font-variant-numeric:tabular-nums">
+        Ȳ = ${hasReading ? reading : "—"}
+      </span>
+    </div>`;
+}
 
 function renderDaylight(state) {
   const sunrise = 5.5;
