@@ -159,6 +159,8 @@ class CameraStatus(BaseModel):
     pending_bytes: int = 0
     in_schedule: Optional[bool] = None
     local_hour: Optional[int] = None
+    current_light: Optional[int] = Field(default=None, ge=0, le=255)
+    signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
 
 
 class CameraRecord(BaseModel):
@@ -176,6 +178,8 @@ class CheckinRequest(BaseModel):
     pending_bytes: Optional[int] = Field(default=None, ge=0)
     in_schedule: Optional[bool] = None
     local_hour: Optional[int] = Field(default=None, ge=0, le=23)
+    current_light: Optional[int] = Field(default=None, ge=0, le=255)
+    signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
 
 
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
@@ -682,6 +686,10 @@ def post_checkin(
         status["in_schedule"] = payload.in_schedule
     if payload.local_hour is not None:
         status["local_hour"] = payload.local_hour
+    if payload.current_light is not None:
+        status["current_light"] = payload.current_light
+    if payload.signal_dbm is not None:
+        status["signal_dbm"] = payload.signal_dbm
     status["last_error"] = payload.last_error
 
     cameras[camera_id] = record

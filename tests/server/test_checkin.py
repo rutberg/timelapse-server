@@ -101,3 +101,35 @@ def test_checkin_creates_camera_if_missing(client):
     assert response.status_code == 200
     cameras = client.get("/api/cameras").json()["cameras"]
     assert any(c["camera_id"] == "new-camera" for c in cameras)
+
+
+def test_checkin_accepts_current_light(client, tmp_data_dir):
+    response = client.post(
+        "/api/cameras/cam-light/checkin",
+        json={"agent_version": "0.8.0", "current_light": 142},
+    )
+    assert response.status_code == 200
+
+    listing = client.get("/api/cameras").json()
+    cam = next(c for c in listing["cameras"] if c["camera_id"] == "cam-light")
+    assert cam["status"]["current_light"] == 142
+
+
+def test_checkin_accepts_signal_dbm(client, tmp_data_dir):
+    response = client.post(
+        "/api/cameras/cam-rssi/checkin",
+        json={"agent_version": "0.8.0", "signal_dbm": -62},
+    )
+    assert response.status_code == 200
+
+    listing = client.get("/api/cameras").json()
+    cam = next(c for c in listing["cameras"] if c["camera_id"] == "cam-rssi")
+    assert cam["status"]["signal_dbm"] == -62
+
+
+def test_checkin_current_light_range(client, tmp_data_dir):
+    bad = client.post(
+        "/api/cameras/cam-bad/checkin",
+        json={"agent_version": "0.8.0", "current_light": 300},
+    )
+    assert bad.status_code == 422
