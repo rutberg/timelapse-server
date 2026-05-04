@@ -13,7 +13,7 @@ Replace the current Pico-CSS / Alpine UI with the dark-themed v2 design from the
 - Building out the Library or Settings views beyond what the design ships as stubs
 - Implementing the Frames or Renders camera tabs beyond placeholder text
 - Server-level configuration page (placeholder only)
-- GIF/WebM render formats (existing MP4 pipeline only; the format selector in the render modal is forced to `mp4`)
+- WebM render format (the format selector ships with MP4 and GIF only; WebM is removed)
 
 ## Architecture
 
@@ -104,6 +104,17 @@ Used by the dashboard's storage stat card and the sidebar storage meter.
 
 Removes the camera from `config.json` and deletes its image/video directories on disk. Returns 204. The settings tab's "Delete camera" button calls this.
 
+### `POST /api/cameras/:id/videos` — accept `format`
+
+Body gains an optional `format: "mp4" | "gif"` (defaults to `"mp4"` for back-compat). GIF output uses ffmpeg's two-pass palette pipeline:
+
+```
+ffmpeg -framerate <fps> -i frames.txt -vf "scale=720:-1:flags=lanczos,palettegen" palette.png
+ffmpeg -framerate <fps> -i frames.txt -i palette.png -filter_complex "scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse" out.gif
+```
+
+Output filename gets the matching extension (`.mp4` or `.gif`).
+
 ## Agent changes
 
 1. **Honour `schedule_days`** in `is_in_schedule()` alongside `capture_hours`
@@ -130,7 +141,7 @@ def sample_light_level() -> int | None:
 The full v2 tree from the handoff bundle is copied into `server/app/static/v2/` with these adjustments:
 
 1. **Remove the Google Fonts `<link>`** in `v2/index.html`
-2. **Force `format: "mp4"`** in the render modal — strip the GIF/WebM buttons (or disable them with a "coming soon" tooltip)
+2. **Render modal**: keep the MP4 and GIF buttons; remove WebM
 3. **Connection signal block** in camera detail uses `status.signal_dbm`; if absent, the bars render as "no signal" — no UI changes needed, the design already handles null
 
 The current `server/app/static/index.html`, `app.js`, `styles.css`, and `views/*.js` are deleted. The FastAPI route that serves `index.html` is updated to serve `v2/index.html`.
@@ -174,6 +185,6 @@ Resolution choice: 64×48 = 3072 Y samples is enough to be robust to noise and f
 
 - **Vanilla JS not Alpine.** The handoff design dropped Alpine entirely after re-reading the project; we follow that. The previous Alpine usage was a single `x-data` binding for hash routing — easily replaced.
 - **System fonts not vendored fonts.** Vendoring Inter + JetBrains Mono is 4–6 woff2 files (~600 KB). System fallbacks are visually close enough on the platforms this dashboard runs on (developer machines), and they keep the offline-LAN constraint trivially satisfied.
-- **MP4 only for render.** The existing pipeline emits MP4. GIF/WebM stubs in the modal are removed rather than misleadingly enabled.
+- **MP4 + GIF for render; WebM dropped.** ffmpeg already in the pipeline handles both. GIF uses a two-pass `palettegen` / `paletteuse` filter chain for decent quality at typical timelapse sizes. WebM stubbed out of the modal — adds a third codec path for marginal benefit.
 - **Lat/lon optional with fallback.** Daylight mode without lat/lon falls back to 06:00–20:00 rather than refusing to set the mode. Lower friction for first-time setup.
 - **`current_light` reported every tick, not just in scene mode.** Cheap, gives the UI a live reading for camera tuning even when the user isn't in scene mode.
