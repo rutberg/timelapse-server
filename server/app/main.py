@@ -729,6 +729,21 @@ def post_checkin(
     return {"acknowledged": True, "last_seen": now_iso}
 
 
+@app.delete("/api/cameras/{camera_id}", status_code=204)
+def delete_camera(camera_id: str) -> None:
+    camera_id = safe_identifier(camera_id)
+    store = load_store()
+    cameras = store.setdefault("cameras", {})
+    cameras.pop(camera_id, None)
+    save_store(store)
+
+    for sub in ("images", "videos"):
+        path = DATA_DIR / sub / camera_id
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    return None
+
+
 RELEASES_DIR_NAME = "releases"
 
 
