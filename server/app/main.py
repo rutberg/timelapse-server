@@ -313,6 +313,30 @@ def ensure_data_dir() -> None:
     (DATA_DIR / "videos").mkdir(exist_ok=True)
 
 
+def directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def compute_stats() -> Dict[str, int]:
+    """Storage usage and capacity for the data directory's filesystem."""
+    used = directory_size_bytes(DATA_DIR / "images") + directory_size_bytes(DATA_DIR / "videos")
+    try:
+        usage = shutil.disk_usage(str(DATA_DIR))
+        capacity = usage.total
+    except OSError:
+        capacity = used  # degenerate fallback so the UI shows 100%
+    return {"storage_bytes": int(used), "storage_capacity_bytes": int(capacity)}
+
+
 LEGACY_CONFIG_KEYS = {
     "enabled",
     "interval_seconds",
@@ -632,12 +656,11 @@ def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) 
 def list_cameras() -> Dict[str, Any]:
     store = load_store()
     cameras = store.setdefault("cameras", {})
-    return {
-        "cameras": [
-            camera_summary(camera_id, config)
-            for camera_id, config in sorted(cameras.items())
-        ]
-    }
+    cameras_payload = [
+        camera_summary(camera_id, config)
+        for camera_id, config in sorted(cameras.items())
+    ]
+    return {"cameras": cameras_payload, "stats": compute_stats()}
 
 
 @app.get("/api/cameras/{camera_id}/config")
