@@ -19,3 +19,4 @@ dev-data/
 .dev-server.pid
 .dev-server.log
 .playwright-mcp/
+CLAUDE.md
