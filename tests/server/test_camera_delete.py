@@ -28,3 +28,33 @@ def test_delete_unknown_camera_returns_204(client, tmp_data_dir):
 def test_delete_validates_camera_id(client, tmp_data_dir):
     response = client.delete("/api/cameras/..bad..")
     assert response.status_code == 400
+
+
+def test_delete_removes_agent_manifest(client, tmp_data_dir):
+    # Create a pending agent (writes the manifest on disk).
+    client.post("/api/agents", json={
+        "agent_id": "cam-keys",
+        "display_name": "Cam keys",
+        "expected_hostname": "cam-keys",
+        "ssh_user": "pi",
+    })
+
+    response = client.delete("/api/cameras/cam-keys")
+    assert response.status_code == 204
+
+    # Manifest should be gone — listing should not include the agent.
+    listing = client.get("/api/agents").json()
+    ids = [a["agent_id"] for a in listing.get("agents", [])]
+    assert "cam-keys" not in ids
+
+
+def test_delete_removes_agent_key_directory(client, tmp_data_dir):
+    # Seed a fake key directory.
+    key_dir = tmp_data_dir / "agents" / "cam-keys2"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    (key_dir / "id_ed25519").write_bytes(b"PRIVATE")
+    (key_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAA test")
+
+    response = client.delete("/api/cameras/cam-keys2")
+    assert response.status_code == 204
+    assert not (tmp_data_dir / "agents" / "cam-keys2").exists()
