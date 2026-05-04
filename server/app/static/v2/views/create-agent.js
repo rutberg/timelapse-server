@@ -305,6 +305,21 @@ async function renderWizard(root) {
         method: "POST",
         body: JSON.stringify({ ip_fallback: ip_fallback || null, sudo_password: state.sudo_password || null }),
       });
+      // Seed the display_name into the camera config so the UI shows the friendly label
+      // immediately, not the raw camera_id, before the agent's first checkin.
+      if (state.display_name && state.display_name !== state.created.agent_id) {
+        try {
+          const cfg = await api.fetchJson(`/api/cameras/${encodeURIComponent(state.created.agent_id)}/config`);
+          cfg.display_name = state.display_name;
+          await api.fetchJson(`/api/cameras/${encodeURIComponent(state.created.agent_id)}/config`, {
+            method: "PUT",
+            body: JSON.stringify(cfg),
+          });
+        } catch (e) {
+          // Non-fatal; user can edit in Settings tab.
+          console.warn("display_name seed failed:", e.message);
+        }
+      }
       state.sudo_password = "";
       state.provisionState = "ok";
       invalidateSidebar();
