@@ -923,6 +923,33 @@ def run_ffmpeg_gif(list_path: Path, output_path: Path, fps: int, work_dir: Path,
 SUPPORTED_VIDEO_FORMATS = {".mp4": "video/mp4", ".gif": "image/gif"}
 
 
+@app.get("/api/cameras/{camera_id}/videos")
+def list_videos(camera_id: str) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    video_dir = DATA_DIR / "videos" / camera_id
+    if not video_dir.exists():
+        return {"videos": []}
+    items = []
+    for entry in video_dir.iterdir():
+        if not entry.is_file():
+            continue
+        suffix = entry.suffix.lower()
+        if suffix not in (".mp4", ".gif"):
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        items.append({
+            "filename": entry.name,
+            "size_bytes": stat.st_size,
+            "format": suffix.lstrip("."),
+            "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    items.sort(key=lambda v: v["created_at"], reverse=True)
+    return {"videos": items}
+
+
 @app.get("/api/cameras/{camera_id}/videos/{filename}")
 def read_video(
     camera_id: str,
@@ -935,6 +962,17 @@ def read_video(
     if media_type is None or not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
     return FileResponse(path, media_type=media_type)
+
+
+@app.delete("/api/cameras/{camera_id}/videos/{filename}", status_code=204)
+def delete_video(camera_id: str, filename: str) -> None:
+    camera_id = safe_identifier(camera_id)
+    filename = safe_identifier(filename)
+    path = DATA_DIR / "videos" / camera_id / filename
+    if path.suffix not in SUPPORTED_VIDEO_FORMATS or not path.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+    path.unlink(missing_ok=True)
+    return None
 
 
 @app.api_route(
