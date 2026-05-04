@@ -47,7 +47,7 @@ export function openRenderModal(cameraId) {
         <div style="margin-top:16px">
           <div class="lbl">Format</div>
           <div class="seg" style="margin-top:6px" id="r-fmt-seg">
-            ${["mp4","gif","webm"].map(f=>`<button data-fmt="${f}" class="${f===format?"active":""}">${f.toUpperCase()}</button>`).join("")}
+            ${["mp4","gif"].map(f=>`<button data-fmt="${f}" class="${f===format?"active":""}">${f.toUpperCase()}</button>`).join("")}
           </div>
         </div>
         ${message?`<div class="small" style="margin-top:14px;color:${message.startsWith("Error")?"var(--red)":"var(--green)"}">${escapeHtml(message)}</div>`:""}
