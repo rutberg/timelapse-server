@@ -146,6 +146,16 @@ curl -X PUT http://<SERVER_IP>:8080/api/cameras/<CAMERA_ID>/config \
   }'
 ```
 
+### Scheduling modes
+
+Each camera supports three capture-schedule modes via the `schedule_mode` config field:
+
+- **`hours`** — fixed start/end window in agent local time. The UI uses two hour inputs and a visual track; on the wire `capture_hours = [start..end-1]`.
+- **`daylight`** — auto-derived from sunrise/sunset for the camera's `latitude`/`longitude` (NOAA approximation, hour resolution). Falls back to 06:00–20:00 when location is unset.
+- **`scene`** — capture only when the scene is bright enough. Configured by `light_threshold` (mean Y luminance, 0–255). Before each scheduled capture the agent samples a 64×48 YUV thumbnail; if mean Y is below the threshold the frame is skipped. The latest reading is reported as `current_light` in heartbeats and shown live in the UI.
+
+A weekday gate (`schedule_days`, ISO weekdays 1=Mon..7=Sun, `null` = every day) applies to all three modes.
+
 ### Generating Video
 
 Trigger video generation for a specific camera:
