@@ -94,6 +94,8 @@ class CameraStatus(BaseModel):
     agent_version: Optional[str] = None
     pending_count: int = 0
     pending_bytes: int = 0
+    in_schedule: Optional[bool] = None
+    local_hour: Optional[int] = None
 
 
 class CameraRecord(BaseModel):
@@ -109,6 +111,8 @@ class CheckinRequest(BaseModel):
     last_error: Optional[str] = None
     pending_count: Optional[int] = Field(default=None, ge=0)
     pending_bytes: Optional[int] = Field(default=None, ge=0)
+    in_schedule: Optional[bool] = None
+    local_hour: Optional[int] = Field(default=None, ge=0, le=23)
 
 
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
@@ -597,6 +601,10 @@ def post_checkin(
         status["pending_count"] = payload.pending_count
     if payload.pending_bytes is not None:
         status["pending_bytes"] = payload.pending_bytes
+    if payload.in_schedule is not None:
+        status["in_schedule"] = payload.in_schedule
+    if payload.local_hour is not None:
+        status["local_hour"] = payload.local_hour
     status["last_error"] = payload.last_error
 
     cameras[camera_id] = record

@@ -53,6 +53,33 @@ def test_checkin_records_pending_queue_metrics(client):
     assert record["status"]["pending_bytes"] == 2_500_000
 
 
+def test_checkin_records_schedule_state(client):
+    response = client.post(
+        "/api/cameras/tomatoes/checkin",
+        json={
+            "agent_version": "0.6.0",
+            "in_schedule": False,
+            "local_hour": 3,
+        },
+    )
+    assert response.status_code == 200
+
+    record = next(
+        c for c in client.get("/api/cameras").json()["cameras"]
+        if c["camera_id"] == "tomatoes"
+    )
+    assert record["status"]["in_schedule"] is False
+    assert record["status"]["local_hour"] == 3
+
+
+def test_checkin_local_hour_out_of_range_rejected(client):
+    response = client.post(
+        "/api/cameras/tomatoes/checkin",
+        json={"agent_version": "0.6.0", "local_hour": 24},
+    )
+    assert response.status_code == 422
+
+
 def test_checkin_pending_count_defaults_to_zero(client):
     client.post(
         "/api/cameras/tomatoes/checkin",

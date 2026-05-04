@@ -10,12 +10,14 @@ function escapeHtml(value) {
 }
 
 function statusClass(status) {
+  if (status?.is_online && status?.in_schedule === false) return "status-offline";
   if (status?.is_online) return "status-online";
   if (status?.last_error) return "status-failed";
   return "status-offline";
 }
 
 function statusLabel(status) {
+  if (status?.is_online && status?.in_schedule === false) return "scheduled (paused)";
   if (status?.is_online) return "online";
   if (status?.last_seen) return "offline";
   return "never seen";

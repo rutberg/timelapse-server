@@ -58,6 +58,17 @@ class AgentState:
     last_error: Optional[str] = None
     pending_count: int = 0
     pending_bytes: int = 0
+    in_schedule: bool = True
+    local_hour: int = 0
+
+
+def next_allowed_hour(current_hour: int, capture_hours: list) -> int:
+    """Smallest hour in capture_hours strictly greater than current_hour, wrapping at 24."""
+    sorted_hours = sorted(set(capture_hours))
+    for hour in sorted_hours:
+        if hour > current_hour:
+            return hour
+    return sorted_hours[0]
 
 
 FALLBACK_MAX_PENDING_BYTES = 500_000_000  # used when disk_usage fails
@@ -316,6 +327,8 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "last_error": state.last_error,
         "pending_count": state.pending_count,
         "pending_bytes": state.pending_bytes,
+        "in_schedule": state.in_schedule,
+        "local_hour": state.local_hour,
     }
     try:
         post_json(url, payload)
@@ -484,6 +497,9 @@ def run_agent(settings: Dict[str, Any]) -> None:
         AGENT_VERSION, settings["camera_id"], max_pending_bytes,
     )
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
+    startup_now = datetime.now()
+    state.local_hour = startup_now.hour
+    state.in_schedule = hour_in_schedule(startup_now, remote_config.get("capture_hours"))
     post_checkin(settings, state)
 
     while True:
@@ -509,7 +525,23 @@ def run_agent(settings: Dict[str, Any]) -> None:
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))
         capture_hours = remote_config.get("capture_hours")
-        in_schedule = hour_in_schedule(datetime.now(), capture_hours)
+        local_now = datetime.now()
+        in_schedule = hour_in_schedule(local_now, capture_hours)
+        # Update state every loop so heartbeat reflects the current view.
+        state.local_hour = local_now.hour
+        if in_schedule != state.in_schedule:
+            state.in_schedule = in_schedule
+            if not in_schedule and capture_hours:
+                next_hour = next_allowed_hour(local_now.hour, capture_hours)
+                logging.info(
+                    "Capture paused — outside schedule (local hour %d, allowed %s, resume at %02d:00)",
+                    local_now.hour, capture_hours, next_hour,
+                )
+            elif in_schedule and capture_hours:
+                logging.info(
+                    "Capture resumed — local hour %d is within schedule %s",
+                    local_now.hour, capture_hours,
+                )
         if enabled and not in_schedule and now >= next_capture:
             # Outside the schedule: skip this slot, re-check at the next interval.
             next_capture = now + interval_seconds

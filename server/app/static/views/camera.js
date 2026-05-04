@@ -15,6 +15,28 @@ function optionalNumber(id) {
   return value ? Number(value) : null;
 }
 
+function nextAllowedHour(currentHour, captureHours) {
+  const sorted = Array.from(new Set(captureHours)).sort((a, b) => a - b);
+  for (const hour of sorted) {
+    if (hour > currentHour) return hour;
+  }
+  return sorted[0];
+}
+
+function scheduleSummary(status, config) {
+  const hours = config?.capture_hours;
+  if (!hours || !hours.length) return "always (no schedule)";
+  const list = hours.map((h) => String(h).padStart(2, "0")).join(", ");
+  if (status?.in_schedule === false && status?.local_hour != null) {
+    const next = nextAllowedHour(status.local_hour, hours);
+    return `paused (resumes at ${String(next).padStart(2, "0")}:00 agent local) — allowed: ${list}`;
+  }
+  if (status?.in_schedule === true) {
+    return `active — allowed hours: ${list}`;
+  }
+  return `allowed hours: ${list}`;
+}
+
 async function renderCamera(root, hash) {
   const cameraId = decodeURIComponent(hash.replace("#/cameras/", "").trim());
   if (!cameraId) {
@@ -48,10 +70,12 @@ async function renderCamera(root, hash) {
         <h3>Status</h3>
         <ul>
           <li><strong>Online:</strong> ${status.is_online ? "yes" : "no"}</li>
+          <li><strong>Schedule:</strong> ${scheduleSummary(status, camera.config)}</li>
           <li><strong>Last seen:</strong> ${escapeHtml(status.last_seen || "-")}</li>
           <li><strong>Hostname:</strong> ${escapeHtml(status.hostname || "-")}</li>
           <li><strong>Source IP:</strong> ${escapeHtml(status.source_ip || "-")}</li>
           <li><strong>Agent version:</strong> ${escapeHtml(status.agent_version || "-")}</li>
+          <li><strong>Agent local hour:</strong> ${status.local_hour != null ? String(status.local_hour).padStart(2, "0") + ":00" : "-"}</li>
           <li><strong>Last capture:</strong> ${escapeHtml(status.last_capture_at || "-")}</li>
           <li><strong>Last upload:</strong> ${escapeHtml(status.last_upload_at || "-")}</li>
           <li><strong>Last error:</strong> ${escapeHtml(status.last_error || "none")}</li>

@@ -38,6 +38,37 @@ def test_post_checkin_sends_expected_payload():
     assert captured["body"]["hostname"]
     assert captured["body"]["pending_count"] == 0
     assert captured["body"]["pending_bytes"] == 0
+    assert captured["body"]["in_schedule"] is True
+    assert captured["body"]["local_hour"] == 0
+
+
+def test_post_checkin_sends_schedule_state():
+    settings = {"camera_id": "x", "server_url": "http://server.local:8080"}
+    state = agent.AgentState(in_schedule=False, local_hour=3)
+
+    captured: dict = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        response = MagicMock()
+        response.read.return_value = b'{"acknowledged": true}'
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda self, *args: None
+        return response
+
+    with patch.object(agent, "urlopen", side_effect=fake_urlopen):
+        agent.post_checkin(settings, state)
+
+    assert captured["body"]["in_schedule"] is False
+    assert captured["body"]["local_hour"] == 3
+
+
+def test_next_allowed_hour_returns_smallest_greater_hour():
+    schedule = [6, 7, 8, 9, 18, 19, 20, 21, 22]
+    assert agent.next_allowed_hour(0, schedule) == 6
+    assert agent.next_allowed_hour(8, schedule) == 9
+    assert agent.next_allowed_hour(9, schedule) == 18  # gap between 9 and 18
+    assert agent.next_allowed_hour(22, schedule) == 6  # wraps to next day
 
 
 def test_post_checkin_includes_pending_counts():
