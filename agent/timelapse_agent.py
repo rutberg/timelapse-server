@@ -713,6 +713,8 @@ def run_agent(settings: Dict[str, Any]) -> None:
         interval_seconds = int(remote_config.get("interval_seconds", 900))
         local_now = datetime.now().astimezone()
         schedule_mode = remote_config.get("schedule_mode")
+        if schedule_mode != "scene":
+            state.current_light = None
         if schedule_mode == "daylight":
             offset_h = local_now.utcoffset().total_seconds() / 3600
             effective_hours = daylight_capture_hours(
