@@ -412,13 +412,21 @@ def build_capture_command(command: str, output_path: Path, config: Dict[str, Any
     return capture_command
 
 
+def now_local_iso() -> str:
+    """ISO-8601 timestamp with explicit UTC offset, in agent local time."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
     command = find_capture_command()
     if not command:
         raise RuntimeError("No camera command found: expected rpicam-still, libcamera-still, or raspistill")
 
-    captured_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    output_path = work_dir / "pending" / f"{captured_at}.jpg"
+    # Filename uses local wall-clock time so files sort by what the camera
+    # saw, not by UTC. The sidecar carries the full ISO including offset
+    # so the timezone is never lost.
+    captured_at_filename = datetime.now().strftime("%Y%m%dT%H%M%S")
+    output_path = work_dir / "pending" / f"{captured_at_filename}.jpg"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(".tmp.jpg")
 
@@ -426,7 +434,7 @@ def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
     temp_path.replace(output_path)
 
     metadata = {
-        "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "captured_at": now_local_iso(),
         "hostname": socket.gethostname(),
     }
     write_json(output_path.with_suffix(".json"), metadata)
@@ -454,10 +462,7 @@ def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) 
     for image_path in sorted(pending_dir.glob("*.jpg")):
         metadata_path = image_path.with_suffix(".json")
         metadata = load_json(metadata_path) if metadata_path.exists() else {}
-        captured_at = metadata.get(
-            "captured_at",
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        )
+        captured_at = metadata.get("captured_at", now_local_iso())
 
         try:
             post_multipart(url, image_path, captured_at)
@@ -468,7 +473,7 @@ def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) 
 
         image_path.unlink(missing_ok=True)
         metadata_path.unlink(missing_ok=True)
-        state.last_upload_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        state.last_upload_at = now_local_iso()
         state.last_error = None
         logging.info("Uploaded %s", image_path.name)
 
@@ -548,7 +553,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
         if enabled and in_schedule and now >= next_capture:
             try:
                 image_path = capture_frame(work_dir, remote_config)
-                state.last_capture_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                state.last_capture_at = now_local_iso()
                 state.last_error = None
                 logging.info("Captured %s", image_path.name)
             except Exception as error:

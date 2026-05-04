@@ -321,21 +321,35 @@ def set_camera_config(camera_id: str, config: CameraConfig) -> CameraConfig:
 
 
 def parse_capture_time(value: Optional[str]) -> datetime:
+    """Parse the X-Captured-At header.
+
+    The agent sends an ISO-8601 string in its local time with explicit
+    UTC offset (e.g. "2026-05-04T07:35:00+02:00"). We preserve that
+    offset so the file path and filename reflect the camera's local
+    wall-clock time.
+
+    Falls back to the server's local time when the header is missing
+    or malformed.
+    """
     if not value:
-        return datetime.now(timezone.utc)
+        return datetime.now().astimezone()
     try:
         normalized = value.replace("Z", "+00:00")
         parsed = datetime.fromisoformat(normalized)
     except ValueError:
-        return datetime.now(timezone.utc)
+        return datetime.now().astimezone()
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        # Header had no offset — assume server local time so date math works.
+        parsed = parsed.astimezone()
+    return parsed
 
 
 def image_path(camera_id: str, captured_at: datetime) -> Path:
+    # captured_at carries the camera's wall-clock time + its UTC offset.
+    # Use the wall-clock components directly so files land in the day the
+    # camera saw, not the day UTC saw.
     day = captured_at.strftime("%Y-%m-%d")
-    timestamp = captured_at.strftime("%Y%m%dT%H%M%SZ")
+    timestamp = captured_at.strftime("%Y%m%dT%H%M%S")
     directory = DATA_DIR / "images" / camera_id / day
     directory.mkdir(parents=True, exist_ok=True)
     candidate = directory / f"{timestamp}.jpg"
