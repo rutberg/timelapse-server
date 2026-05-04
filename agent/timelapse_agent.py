@@ -713,8 +713,6 @@ def run_agent(settings: Dict[str, Any]) -> None:
         interval_seconds = int(remote_config.get("interval_seconds", 900))
         local_now = datetime.now().astimezone()
         schedule_mode = remote_config.get("schedule_mode")
-        if schedule_mode != "scene":
-            state.current_light = None
         if schedule_mode == "daylight":
             offset_h = local_now.utcoffset().total_seconds() / 3600
             effective_hours = daylight_capture_hours(
@@ -744,20 +742,20 @@ def run_agent(settings: Dict[str, Any]) -> None:
         if enabled and not in_schedule and now >= next_capture:
             # Outside the schedule: skip this slot, re-check at the next interval.
             next_capture = now + interval_seconds
-        # Scene-light gate: when in scene mode, sample luminance and skip if too dark.
-        if (
-            schedule_mode == "scene"
-            and enabled
-            and in_schedule
-            and now >= next_capture
-        ):
+        # Always sample scene luminance before each capture so the user can see
+        # a live reading regardless of schedule_mode. Sampling adds ~200ms;
+        # negligible compared to the capture interval.
+        if enabled and in_schedule and now >= next_capture:
             tool = find_capture_command()
-            light_reading = sample_light_level(tool) if tool else None
-            state.current_light = light_reading
-            if not should_capture_for_scene(light_reading, remote_config.get("light_threshold")):
+            if tool:
+                state.current_light = sample_light_level(tool)
+            # Scene-light mode: skip the actual capture if below threshold.
+            if schedule_mode == "scene" and not should_capture_for_scene(
+                state.current_light, remote_config.get("light_threshold")
+            ):
                 logging.info(
                     "Scene-light gate: Y=%s < threshold=%s, skipping",
-                    light_reading, remote_config.get("light_threshold"),
+                    state.current_light, remote_config.get("light_threshold"),
                 )
                 next_capture = now + interval_seconds
         if enabled and in_schedule and now >= next_capture:
