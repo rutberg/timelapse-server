@@ -64,3 +64,9 @@ class TestScheduleModes:
     def test_display_name_optional(self):
         cfg = CameraConfig(display_name="Tomato camera")
         assert cfg.display_name == "Tomato camera"
+
+    def test_display_name_max_length(self):
+        # 120 chars is the limit; 121 must reject.
+        CameraConfig(display_name="x" * 120)  # ok
+        with pytest.raises(ValueError):
+            CameraConfig(display_name="x" * 121)

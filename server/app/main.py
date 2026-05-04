@@ -137,10 +137,12 @@ class CameraConfig(BaseModel):
             if not self.capture_hours:
                 raise ValueError("schedule_mode='hours' requires non-empty capture_hours")
         elif self.schedule_mode == "daylight":
+            # daylight derives hours per-day from sunrise/sunset; explicit hours are dropped
             self.capture_hours = None
         elif self.schedule_mode == "scene":
             if self.light_threshold is None:
                 raise ValueError("schedule_mode='scene' requires light_threshold")
+            # scene gates on luminance, not clock; explicit hours are dropped
             self.capture_hours = None
         return self
 
