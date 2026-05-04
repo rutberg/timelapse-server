@@ -70,3 +70,7 @@ class TestScheduleModes:
         CameraConfig(display_name="x" * 120)  # ok
         with pytest.raises(ValueError):
             CameraConfig(display_name="x" * 121)
+
+    def test_empty_schedule_days_rejected(self):
+        with pytest.raises(ValueError, match="at least one weekday"):
+            CameraConfig(schedule_days=[])

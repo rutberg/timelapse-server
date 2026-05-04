@@ -109,7 +109,12 @@ export function mountScheduleControl(host, opts) {
     host.querySelectorAll("[data-day]").forEach(btn => {
       btn.addEventListener("click", () => {
         const d = Number(btn.dataset.day);
-        if (state.days.has(d)) state.days.delete(d); else state.days.add(d);
+        if (state.days.has(d)) {
+          if (state.days.size <= 1) return;  // refuse: would leave no days enabled
+          state.days.delete(d);
+        } else {
+          state.days.add(d);
+        }
         render(); emit();
       });
     });
@@ -295,8 +300,7 @@ function renderDayPicker(state) {
         }).join("")}
       </div>
       <div class="mono small" style="margin-top:6px">
-        ${state.days.size === 0 ? "No days selected — schedule paused" :
-          state.days.size === 7 ? "Every day" :
+        ${state.days.size === 7 ? "Every day" :
           `${state.days.size} day${state.days.size === 1 ? "" : "s"} per week`}
       </div>
     </div>`;
