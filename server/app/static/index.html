@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Timelapse</title>
+  <link rel="stylesheet" href="/static/vendor/pico.min.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script defer src="/static/vendor/alpine.min.js"></script>
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body x-data="{ route: window.location.hash || '#/dashboard' }"
+      @hashchange.window="route = window.location.hash || '#/dashboard'">
+  <header class="container">
+    <nav>
+      <ul>
+        <li><strong>Timelapse</strong></li>
+      </ul>
+      <ul>
+        <li><a href="#/dashboard">Cameras</a></li>
+        <li><a href="#/agents/new">Add agent</a></li>
+      </ul>
+    </nav>
+  </header>
+  <main id="app-root" class="container">
+    <p aria-busy="true">Loading...</p>
+  </main>
+  <footer class="container">
+    <small>Timelapse server - LAN only</small>
+  </footer>
+</body>
+</html>

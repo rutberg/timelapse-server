@@ -1,0 +1,46 @@
+:root {
+  --pico-spacing: 0.9rem;
+}
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.status-online {
+  color: var(--pico-color-jade-500);
+}
+
+.status-offline {
+  color: var(--pico-color-grey-500);
+}
+
+.status-failed {
+  color: var(--pico-color-red-500);
+}
+
+.troubleshooting {
+  background: var(--pico-card-background-color);
+  padding: 1rem;
+  border-radius: var(--pico-border-radius);
+}
+
+img.preview {
+  width: 100%;
+  border-radius: var(--pico-border-radius);
+}
+
+.code-block {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--pico-code-background-color);
+  padding: 0.75rem;
+  border-radius: var(--pico-border-radius);
+}
+
+nav a[aria-current="page"] {
+  font-weight: 700;
+  text-decoration: underline;
+}
