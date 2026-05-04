@@ -138,6 +138,7 @@ async function renderCamera(root, hash) {
 
     if (tab === "schedule") wireSchedule();
     if (tab === "settings") wireSettings();
+    if (tab === "renders") wireRenders();
 
     root.querySelector('[data-action="render"]')?.addEventListener("click", async () => {
       const { openRenderModal } = await import("/static/v2/views/library.js");
@@ -310,11 +311,90 @@ async function renderCamera(root, hash) {
         <div class="between">
           <div>
             <div class="lbl">Renders for this camera</div>
-            <div class="small" style="margin-top:6px">Generated MP4s and GIFs. Wire to <span class="mono" style="color:var(--ink)">/api/cameras/${escapeHtml(cameraId)}/videos</span>.</div>
+            <div class="small" style="margin-top:6px">Generated MP4s and GIFs.</div>
           </div>
           <button class="btn primary" data-action="render">${icon("film",12)}New render</button>
         </div>
-        <div class="empty" style="margin-top:24px"><h3>No renders yet</h3><p>Click "New render" to make one from the captured frames.</p></div>
+        <div id="renders-list" style="margin-top:16px">
+          <div class="loading mono small">Loading…</div>
+        </div>
+      </div>`;
+  }
+
+  async function wireRenders() {
+    const list = document.getElementById("renders-list");
+    if (!list) return;
+    try {
+      const data = await api.fetchJson(`/api/cameras/${encId}/videos`);
+      paintRendersList(data.videos || []);
+    } catch (e) {
+      list.innerHTML = `<div class="banner bad">${icon("alert",14)}<div class="small">${escapeHtml(e.message)}</div></div>`;
+    }
+  }
+
+  function paintRendersList(videos) {
+    const list = document.getElementById("renders-list");
+    if (!list) return;
+    if (videos.length === 0) {
+      list.innerHTML = `<div class="empty"><h3>No renders yet</h3><p>Click "New render" to make one from the captured frames.</p></div>`;
+      return;
+    }
+    list.innerHTML = videos.map(v => renderCard(v)).join("");
+    list.querySelectorAll("[data-preview]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const card = btn.closest(".render-card");
+        const slot = card.querySelector(".preview-slot");
+        if (slot.dataset.open === "1") {
+          slot.innerHTML = "";
+          slot.dataset.open = "0";
+          btn.textContent = "Preview";
+        } else {
+          const filename = btn.dataset.preview;
+          const url = `/api/cameras/${encId}/videos/${encodeURIComponent(filename)}`;
+          slot.innerHTML = filename.endsWith(".gif")
+            ? `<img src="${url}" alt="${escapeHtml(filename)}" style="max-width:100%;border-radius:4px;border:1px solid var(--border)"/>`
+            : `<video src="${url}" controls style="width:100%;border-radius:4px;border:1px solid var(--border)"></video>`;
+          slot.dataset.open = "1";
+          btn.textContent = "Hide";
+        }
+      });
+    });
+    list.querySelectorAll("[data-delete]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const filename = btn.dataset.delete;
+        if (!confirm(`Delete ${filename}? This cannot be undone.`)) return;
+        try {
+          await api.fetchJson(`/api/cameras/${encId}/videos/${encodeURIComponent(filename)}`, { method: "DELETE" });
+          await wireRenders();
+        } catch (e) {
+          alert(`Delete failed: ${e.message}`);
+        }
+      });
+    });
+  }
+
+  function renderCard(v) {
+    const url = `/api/cameras/${encId}/videos/${encodeURIComponent(v.filename)}`;
+    return `
+      <div class="card render-card" style="margin-bottom:10px">
+        <div class="card-b">
+          <div class="between">
+            <div class="grow" style="min-width:0">
+              <div style="font-weight:500;font-size:13px;font-family:var(--mono);word-break:break-all">${escapeHtml(v.filename)}</div>
+              <div class="row" style="margin-top:4px;gap:10px">
+                <span class="pill ${v.format === "gif" ? "warn" : ""}">${v.format.toUpperCase()}</span>
+                <span class="mono small">${formatBytes(v.size_bytes)}</span>
+                <span class="mono small">${relativeTime(v.created_at)}</span>
+              </div>
+            </div>
+            <div class="row" style="gap:6px;flex-shrink:0">
+              <button class="btn sm" data-preview="${escapeHtml(v.filename)}">Preview</button>
+              <a class="btn sm" href="${url}" download="${escapeHtml(v.filename)}">${icon("download",12)}Download</a>
+              <button class="btn sm danger" data-delete="${escapeHtml(v.filename)}">${icon("trash",12)}Delete</button>
+            </div>
+          </div>
+          <div class="preview-slot" data-open="0" style="margin-top:10px"></div>
+        </div>
       </div>`;
   }
 
