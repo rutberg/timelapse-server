@@ -109,6 +109,13 @@ async function renderCamera(root, hash) {
         root.innerHTML = `<div class="empty"><h3>Camera not found</h3><div class="mono small">${escapeHtml(cameraId)}</div><p style="margin-top:16px"><a class="btn" href="#/dashboard">${icon("back",12)}Back to dashboard</a></p></div>`;
         return;
       }
+      // While the user is on the schedule tab, don't re-paint the body — that
+      // would destroy the live schedule control mid-edit and silently revert
+      // unsaved selections. Just push the latest light reading into the control.
+      if (tab === "schedule" && scheduleCtl) {
+        scheduleCtl.setCurrentLight(camera.status?.current_light);
+        return;
+      }
       paint();
     } catch (e) {
       root.innerHTML = `<div class="empty"><h3>Failed to load</h3><div class="mono small">${escapeHtml(e.message)}</div></div>`;
