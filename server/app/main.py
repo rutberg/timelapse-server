@@ -530,7 +530,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+    return FileResponse(STATIC_DIR / "v2" / "index.html", media_type="text/html")
 
 
 @app.get("/api/health")
@@ -932,4 +932,4 @@ def api_not_found(path: str) -> None:
 def spa_fallback(path: str) -> FileResponse:
     if path.startswith("api/") or path.startswith("static/"):
         raise HTTPException(status_code=404)
-    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+    return FileResponse(STATIC_DIR / "v2" / "index.html", media_type="text/html")
