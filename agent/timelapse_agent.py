@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -107,6 +107,23 @@ def hour_in_schedule(now: datetime, capture_hours: Optional[list]) -> bool:
     if not capture_hours:
         return True
     return now.hour in set(capture_hours)
+
+
+def is_in_schedule(
+    now: datetime,
+    capture_hours: Optional[list],
+    schedule_days: Optional[list] = None,
+) -> bool:
+    """Combined gate: hour-of-day AND ISO-weekday must both allow capture.
+
+    capture_hours: None = no hour restriction; list of 0-23 ints otherwise.
+    schedule_days: None = every day; list of 1-7 ISO weekdays otherwise.
+                   Empty list (length zero, not None) means "paused — no day enabled".
+    """
+    if schedule_days is not None:
+        if now.isoweekday() not in set(schedule_days):
+            return False
+    return hour_in_schedule(now, capture_hours)
 
 
 def measure_pending(work_dir: Path) -> tuple[int, int]:
@@ -504,7 +521,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
     startup_now = datetime.now()
     state.local_hour = startup_now.hour
-    state.in_schedule = hour_in_schedule(startup_now, remote_config.get("capture_hours"))
+    state.in_schedule = is_in_schedule(startup_now, remote_config.get("capture_hours"), remote_config.get("schedule_days"))
     post_checkin(settings, state)
 
     while True:
@@ -531,7 +548,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
         interval_seconds = int(remote_config.get("interval_seconds", 900))
         capture_hours = remote_config.get("capture_hours")
         local_now = datetime.now()
-        in_schedule = hour_in_schedule(local_now, capture_hours)
+        in_schedule = is_in_schedule(local_now, capture_hours, remote_config.get("schedule_days"))
         # Update state every loop so heartbeat reflects the current view.
         state.local_hour = local_now.hour
         if in_schedule != state.in_schedule:
