@@ -415,6 +415,33 @@ def check_for_update(
     return True
 
 
+def read_wifi_rssi() -> Optional[int]:
+    """Read Wi-Fi RSSI in dBm from `iw dev`. Linux-only; returns None on any failure.
+
+    Parses the line `signal: -57 dBm` from `iw dev wlan0 link` output.
+    """
+    if not shutil.which("iw"):
+        return None
+    interface = os.environ.get("TIMELAPSE_WIFI_IFACE", "wlan0")
+    try:
+        result = subprocess.run(
+            ["iw", "dev", interface, "link"],
+            check=False, capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("signal:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/checkin"
     payload = {
@@ -428,6 +455,7 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "in_schedule": state.in_schedule,
         "local_hour": state.local_hour,
         "current_light": state.current_light,
+        "signal_dbm": read_wifi_rssi(),
     }
     try:
         post_json(url, payload)
