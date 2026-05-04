@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import shutil
@@ -15,7 +16,7 @@ import tarfile
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -95,6 +96,85 @@ def resolve_max_pending_bytes(settings: Dict[str, Any], work_dir: Path) -> int:
     if configured is None:
         return auto_max_pending_bytes(work_dir)
     return int(configured)
+
+
+def solar_window(
+    today: date,
+    latitude: float,
+    longitude: float,
+    utc_offset_hours: float = 0.0,
+) -> Optional[Tuple[int, int]]:
+    """Return (sunrise_hour, sunset_hour_exclusive) in local time, or None.
+
+    Uses the NOAA solar position approximation. Resolution is hour-rounded —
+    enough for capture-window scheduling. Returns:
+        (0, 24) when the sun never sets (polar day),
+        None    when the sun never rises (polar night).
+
+    sunset_hour_exclusive uses ceil(), so a sunset at 22:08 yields 23 —
+    meaning hours 0..22 are included, which correctly covers the 22:xx window.
+    """
+    n = today.timetuple().tm_yday
+    gamma = 2 * math.pi / 365 * (n - 1)
+
+    # Equation of time (minutes)
+    eqtime = 229.18 * (
+        0.000075
+        + 0.001868 * math.cos(gamma)
+        - 0.032077 * math.sin(gamma)
+        - 0.014615 * math.cos(2 * gamma)
+        - 0.040849 * math.sin(2 * gamma)
+    )
+
+    # Solar declination (radians)
+    decl = (
+        0.006918
+        - 0.399912 * math.cos(gamma)
+        + 0.070257 * math.sin(gamma)
+        - 0.006758 * math.cos(2 * gamma)
+        + 0.000907 * math.sin(2 * gamma)
+        - 0.002697 * math.cos(3 * gamma)
+        + 0.00148 * math.sin(3 * gamma)
+    )
+
+    lat_rad = math.radians(latitude)
+    # Hour angle at sunrise/sunset (zenith = 90.833° to include refraction).
+    cos_ha = (math.cos(math.radians(90.833)) - math.sin(lat_rad) * math.sin(decl)) / (
+        math.cos(lat_rad) * math.cos(decl)
+    )
+    if cos_ha < -1.0:
+        return (0, 24)         # polar day
+    if cos_ha > 1.0:
+        return None            # polar night
+    ha = math.degrees(math.acos(cos_ha))
+
+    # Solar noon (UTC minutes)
+    solar_noon_utc_min = 720 - 4 * longitude - eqtime
+    sunrise_utc_min = solar_noon_utc_min - 4 * ha
+    sunset_utc_min = solar_noon_utc_min + 4 * ha
+
+    sunrise_local_h = (sunrise_utc_min / 60.0) + utc_offset_hours
+    sunset_local_h = (sunset_utc_min / 60.0) + utc_offset_hours
+
+    sunrise_h = max(0, min(23, int(math.floor(sunrise_local_h))))
+    sunset_h = max(1, min(24, int(math.ceil(sunset_local_h))))
+    return (sunrise_h, sunset_h)
+
+
+def daylight_capture_hours(
+    today: date,
+    latitude: Optional[float],
+    longitude: Optional[float],
+    utc_offset_hours: float = 0.0,
+) -> List[int]:
+    """Hours of day to capture in 'daylight' mode. Falls back to 06:00–20:00."""
+    if latitude is None or longitude is None:
+        return list(range(6, 20))
+    window = solar_window(today, latitude, longitude, utc_offset_hours)
+    if window is None:
+        return []
+    sunrise_h, sunset_h = window
+    return list(range(sunrise_h, sunset_h))
 
 
 def hour_in_schedule(now: datetime, capture_hours: Optional[list]) -> bool:
@@ -519,9 +599,20 @@ def run_agent(settings: Dict[str, Any]) -> None:
         AGENT_VERSION, settings["camera_id"], max_pending_bytes,
     )
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
-    startup_now = datetime.now()
+    startup_now = datetime.now().astimezone()
     state.local_hour = startup_now.hour
-    state.in_schedule = is_in_schedule(startup_now, remote_config.get("capture_hours"), remote_config.get("schedule_days"))
+    startup_schedule_mode = remote_config.get("schedule_mode")
+    if startup_schedule_mode == "daylight":
+        startup_offset_h = startup_now.utcoffset().total_seconds() / 3600
+        startup_effective_hours = daylight_capture_hours(
+            today=startup_now.date(),
+            latitude=remote_config.get("latitude"),
+            longitude=remote_config.get("longitude"),
+            utc_offset_hours=startup_offset_h,
+        )
+    else:
+        startup_effective_hours = remote_config.get("capture_hours")
+    state.in_schedule = is_in_schedule(startup_now, startup_effective_hours, remote_config.get("schedule_days"))
     post_checkin(settings, state)
 
     while True:
@@ -546,23 +637,33 @@ def run_agent(settings: Dict[str, Any]) -> None:
 
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))
-        capture_hours = remote_config.get("capture_hours")
-        local_now = datetime.now()
-        in_schedule = is_in_schedule(local_now, capture_hours, remote_config.get("schedule_days"))
+        local_now = datetime.now().astimezone()
+        schedule_mode = remote_config.get("schedule_mode")
+        if schedule_mode == "daylight":
+            offset_h = local_now.utcoffset().total_seconds() / 3600
+            effective_hours = daylight_capture_hours(
+                today=local_now.date(),
+                latitude=remote_config.get("latitude"),
+                longitude=remote_config.get("longitude"),
+                utc_offset_hours=offset_h,
+            )
+        else:
+            effective_hours = remote_config.get("capture_hours")
+        in_schedule = is_in_schedule(local_now, effective_hours, remote_config.get("schedule_days"))
         # Update state every loop so heartbeat reflects the current view.
         state.local_hour = local_now.hour
         if in_schedule != state.in_schedule:
             state.in_schedule = in_schedule
-            if not in_schedule and capture_hours:
-                next_hour = next_allowed_hour(local_now.hour, capture_hours)
+            if not in_schedule and effective_hours:
+                next_hour = next_allowed_hour(local_now.hour, effective_hours)
                 logging.info(
                     "Capture paused — outside schedule (local hour %d, allowed %s, resume at %02d:00)",
-                    local_now.hour, capture_hours, next_hour,
+                    local_now.hour, effective_hours, next_hour,
                 )
-            elif in_schedule and capture_hours:
+            elif in_schedule and effective_hours:
                 logging.info(
                     "Capture resumed — local hour %d is within schedule %s",
-                    local_now.hour, capture_hours,
+                    local_now.hour, effective_hours,
                 )
         if enabled and not in_schedule and now >= next_capture:
             # Outside the schedule: skip this slot, re-check at the next interval.
