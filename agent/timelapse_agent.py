@@ -61,6 +61,7 @@ class AgentState:
     pending_bytes: int = 0
     in_schedule: bool = True
     local_hour: int = 0
+    current_light: Optional[int] = None
 
 
 def next_allowed_hour(current_hour: int, capture_hours: list) -> int:
@@ -426,6 +427,7 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "pending_bytes": state.pending_bytes,
         "in_schedule": state.in_schedule,
         "local_hour": state.local_hour,
+        "current_light": state.current_light,
     }
     try:
         post_json(url, payload)
@@ -507,6 +509,50 @@ def build_capture_command(command: str, output_path: Path, config: Dict[str, Any
     if config.get("image_height"):
         capture_command.extend(["--height", str(config["image_height"])])
     return capture_command
+
+
+def mean_y_from_yuv(raw: bytes, width: int, height: int) -> Optional[int]:
+    """Mean Y luminance (0-255) from a raw YUV420 buffer's Y plane.
+
+    YUV420 stores: width*height bytes of Y, then width*height/4 of U, then
+    width*height/4 of V. We only need the Y plane.
+    """
+    y_plane_size = width * height
+    if len(raw) < y_plane_size:
+        return None
+    plane = raw[:y_plane_size]
+    return sum(plane) // len(plane)
+
+
+def sample_light_level(command: str, width: int = 64, height: int = 48) -> Optional[int]:
+    """Capture a tiny YUV thumbnail and return the mean Y luminance (0-255).
+
+    Returns None if no capture tool is available or if the tool fails.
+    """
+    if command.endswith("raspistill"):
+        cmd = [command, "-n", "-t", "200", "-w", str(width), "-h", str(height),
+               "-e", "yuv", "-o", "-"]
+    else:
+        cmd = [command, "--nopreview", "--timeout", "200",
+               "--width", str(width), "--height", str(height),
+               "--encoding", "yuv420", "--output", "-"]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, timeout=5)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+        logging.warning("Light sample failed: %s", error)
+        return None
+    return mean_y_from_yuv(result.stdout, width, height)
+
+
+def should_capture_for_scene(current_light: Optional[int], threshold: Optional[int]) -> bool:
+    """Capture decision for scene-light mode.
+
+    Conservative defaults: missing threshold or missing reading both return True
+    (don't gate captures out due to misconfiguration or transient sample failures).
+    """
+    if threshold is None or current_light is None:
+        return True
+    return current_light >= threshold
 
 
 def now_local_iso() -> str:
@@ -668,6 +714,22 @@ def run_agent(settings: Dict[str, Any]) -> None:
         if enabled and not in_schedule and now >= next_capture:
             # Outside the schedule: skip this slot, re-check at the next interval.
             next_capture = now + interval_seconds
+        # Scene-light gate: when in scene mode, sample luminance and skip if too dark.
+        if (
+            schedule_mode == "scene"
+            and enabled
+            and in_schedule
+            and now >= next_capture
+        ):
+            tool = find_capture_command()
+            light_reading = sample_light_level(tool) if tool else None
+            state.current_light = light_reading
+            if not should_capture_for_scene(light_reading, remote_config.get("light_threshold")):
+                logging.info(
+                    "Scene-light gate: Y=%s < threshold=%s, skipping",
+                    light_reading, remote_config.get("light_threshold"),
+                )
+                next_capture = now + interval_seconds
         if enabled and in_schedule and now >= next_capture:
             try:
                 image_path = capture_frame(work_dir, remote_config)
