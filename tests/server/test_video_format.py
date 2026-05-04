@@ -66,3 +66,34 @@ def test_invalid_format_rejected(client):
         json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "webm"},
     )
     assert response.status_code == 422
+
+
+def test_gif_can_be_downloaded(client):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    rendered = client.post(
+        "/api/cameras/cam-vids/videos",
+        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "gif"},
+    ).json()
+    filename = rendered["path"].split("/")[-1]
+    response = client.get(f"/api/cameras/cam-vids/videos/{filename}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/gif"
+
+
+def test_mp4_can_be_downloaded(client):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    rendered = client.post(
+        "/api/cameras/cam-vids/videos",
+        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "mp4"},
+    ).json()
+    filename = rendered["path"].split("/")[-1]
+    response = client.get(f"/api/cameras/cam-vids/videos/{filename}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"
+
+
+def test_unsupported_extension_returns_404(client):
+    response = client.get("/api/cameras/cam-vids/videos/foo.webm")
+    assert response.status_code == 404

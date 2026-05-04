@@ -120,6 +120,11 @@ class CameraConfig(BaseModel):
     def _validate_schedule_days(cls, value):
         if value is None:
             return value
+        if not value:
+            raise ValueError(
+                "schedule_days must be null or contain at least one weekday; "
+                "use enabled=false to pause"
+            )
         seen = set()
         for day in value:
             if not isinstance(day, int) or isinstance(day, bool):
@@ -738,6 +743,15 @@ def delete_camera(camera_id: str) -> None:
     cameras.pop(camera_id, None)
     save_store(store)
 
+    # Remove agent record + on-disk SSH key material so the camera_id can be recreated cleanly.
+    try:
+        agent_store().delete(camera_id)
+    except Exception:
+        pass
+    agent_dir = DATA_DIR / "agents" / camera_id
+    if agent_dir.exists():
+        shutil.rmtree(agent_dir, ignore_errors=True)
+
     for sub in ("images", "videos"):
         path = DATA_DIR / sub / camera_id
         if path.exists():
@@ -906,6 +920,9 @@ def run_ffmpeg_gif(list_path: Path, output_path: Path, fps: int, work_dir: Path,
         palette_path.unlink(missing_ok=True)
 
 
+SUPPORTED_VIDEO_FORMATS = {".mp4": "video/mp4", ".gif": "image/gif"}
+
+
 @app.get("/api/cameras/{camera_id}/videos/{filename}")
 def read_video(
     camera_id: str,
@@ -914,9 +931,10 @@ def read_video(
     camera_id = safe_identifier(camera_id)
     filename = safe_identifier(filename)
     path = DATA_DIR / "videos" / camera_id / filename
-    if path.suffix != ".mp4" or not path.exists():
+    media_type = SUPPORTED_VIDEO_FORMATS.get(path.suffix)
+    if media_type is None or not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
-    return FileResponse(path, media_type="video/mp4")
+    return FileResponse(path, media_type=media_type)
 
 
 @app.api_route(
