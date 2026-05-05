@@ -16,7 +16,7 @@ from urllib.parse import urlparse, urlunparse
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agents import AgentStore, PendingAgent
 from app.provision_script import build_install_script
@@ -61,6 +61,27 @@ class CameraConfig(BaseModel):
             "None = always. Empty list rejected — use enabled=false to pause."
         ),
     )
+    schedule_mode: Optional[str] = Field(
+        default=None,
+        description="One of 'daylight', 'hours', 'scene'. None = legacy/unset.",
+    )
+    schedule_days: Optional[List[int]] = Field(
+        default=None,
+        description="ISO weekdays (1=Mon..7=Sun) on which capture is allowed. None = every day.",
+    )
+    light_threshold: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=255,
+        description="Mean Y luma 0-255. Required when schedule_mode='scene'.",
+    )
+    display_name: Optional[str] = Field(
+        default=None,
+        max_length=120,
+        description="Human-friendly camera label. Falls back to camera_id.",
+    )
+    latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
 
     @field_validator("capture_hours")
     @classmethod
@@ -83,6 +104,53 @@ class CameraConfig(BaseModel):
             seen.add(hour)
         return sorted(seen)
 
+    @field_validator("schedule_mode")
+    @classmethod
+    def _validate_schedule_mode(cls, value):
+        if value is None:
+            return value
+        if value not in ("daylight", "hours", "scene"):
+            raise ValueError(
+                f"schedule_mode must be 'daylight', 'hours', or 'scene'; got {value!r}"
+            )
+        return value
+
+    @field_validator("schedule_days")
+    @classmethod
+    def _validate_schedule_days(cls, value):
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "schedule_days must be null or contain at least one weekday; "
+                "use enabled=false to pause"
+            )
+        seen = set()
+        for day in value:
+            if not isinstance(day, int) or isinstance(day, bool):
+                raise ValueError(f"schedule_days entries must be ISO weekdays 1-7, got {day!r}")
+            if day < 1 or day > 7:
+                raise ValueError(f"schedule_days entries must be 1 (Mon) - 7 (Sun), got {day}")
+            if day in seen:
+                raise ValueError(f"schedule_days has duplicate {day}")
+            seen.add(day)
+        return sorted(seen)
+
+    @model_validator(mode="after")
+    def _enforce_mode_invariants(self):
+        if self.schedule_mode == "hours":
+            if not self.capture_hours:
+                raise ValueError("schedule_mode='hours' requires non-empty capture_hours")
+        elif self.schedule_mode == "daylight":
+            # daylight derives hours per-day from sunrise/sunset; explicit hours are dropped
+            self.capture_hours = None
+        elif self.schedule_mode == "scene":
+            if self.light_threshold is None:
+                raise ValueError("schedule_mode='scene' requires light_threshold")
+            # scene gates on luminance, not clock; explicit hours are dropped
+            self.capture_hours = None
+        return self
+
 
 class CameraStatus(BaseModel):
     hostname: Optional[str] = None
@@ -96,6 +164,8 @@ class CameraStatus(BaseModel):
     pending_bytes: int = 0
     in_schedule: Optional[bool] = None
     local_hour: Optional[int] = None
+    current_light: Optional[int] = Field(default=None, ge=0, le=255)
+    signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
 
 
 class CameraRecord(BaseModel):
@@ -113,6 +183,8 @@ class CheckinRequest(BaseModel):
     pending_bytes: Optional[int] = Field(default=None, ge=0)
     in_schedule: Optional[bool] = None
     local_hour: Optional[int] = Field(default=None, ge=0, le=23)
+    current_light: Optional[int] = Field(default=None, ge=0, le=255)
+    signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
 
 
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
@@ -158,6 +230,7 @@ class VideoRequest(BaseModel):
     end_date: Optional[str] = None
     fps: int = Field(24, ge=1, le=60)
     name: Optional[str] = None
+    format: str = Field("mp4", pattern=r"^(mp4|gif)$")
 
 
 def model_dict(model: BaseModel) -> Dict[str, Any]:
@@ -244,6 +317,30 @@ def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "images").mkdir(exist_ok=True)
     (DATA_DIR / "videos").mkdir(exist_ok=True)
+
+
+def directory_size_bytes(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def compute_stats() -> Dict[str, int]:
+    """Storage usage and capacity for the data directory's filesystem."""
+    used = directory_size_bytes(DATA_DIR / "images") + directory_size_bytes(DATA_DIR / "videos")
+    try:
+        usage = shutil.disk_usage(str(DATA_DIR))
+        capacity = usage.total
+    except OSError:
+        capacity = used  # degenerate fallback so the UI shows 100%
+    return {"storage_bytes": int(used), "storage_capacity_bytes": int(capacity)}
 
 
 LEGACY_CONFIG_KEYS = {
@@ -438,7 +535,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+    return FileResponse(STATIC_DIR / "v2" / "index.html", media_type="text/html")
 
 
 @app.get("/api/health")
@@ -565,12 +662,11 @@ def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) 
 def list_cameras() -> Dict[str, Any]:
     store = load_store()
     cameras = store.setdefault("cameras", {})
-    return {
-        "cameras": [
-            camera_summary(camera_id, config)
-            for camera_id, config in sorted(cameras.items())
-        ]
-    }
+    cameras_payload = [
+        camera_summary(camera_id, config)
+        for camera_id, config in sorted(cameras.items())
+    ]
+    return {"cameras": cameras_payload, "stats": compute_stats()}
 
 
 @app.get("/api/cameras/{camera_id}/config")
@@ -619,6 +715,10 @@ def post_checkin(
         status["in_schedule"] = payload.in_schedule
     if payload.local_hour is not None:
         status["local_hour"] = payload.local_hour
+    if payload.current_light is not None:
+        status["current_light"] = payload.current_light
+    if payload.signal_dbm is not None:
+        status["signal_dbm"] = payload.signal_dbm
     status["last_error"] = payload.last_error
 
     cameras[camera_id] = record
@@ -633,6 +733,30 @@ def post_checkin(
         KeyArchive(DATA_DIR).archive_private_key(camera_id)
 
     return {"acknowledged": True, "last_seen": now_iso}
+
+
+@app.delete("/api/cameras/{camera_id}", status_code=204)
+def delete_camera(camera_id: str) -> None:
+    camera_id = safe_identifier(camera_id)
+    store = load_store()
+    cameras = store.setdefault("cameras", {})
+    cameras.pop(camera_id, None)
+    save_store(store)
+
+    # Remove agent record + on-disk SSH key material so the camera_id can be recreated cleanly.
+    try:
+        agent_store().delete(camera_id)
+    except Exception:
+        pass
+    agent_dir = DATA_DIR / "agents" / camera_id
+    if agent_dir.exists():
+        shutil.rmtree(agent_dir, ignore_errors=True)
+
+    for sub in ("images", "videos"):
+        path = DATA_DIR / sub / camera_id
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    return None
 
 
 RELEASES_DIR_NAME = "releases"
@@ -734,37 +858,19 @@ def generate_video(
             raise HTTPException(status_code=400, detail=f"Invalid video name: {error.detail}") from error
     else:
         requested_name = f"timelapse-{timestamp}"
-    output_path = video_dir / f"{requested_name}.mp4"
+
+    output_path = video_dir / f"{requested_name}.{request.format}"
     list_path = video_dir / f"{requested_name}.txt"
 
     with list_path.open("w", encoding="utf-8") as list_file:
         for path in images:
             list_file.write(f"file '{ffmpeg_escape(path)}'\n")
 
-    command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-vf",
-        f"fps={request.fps},format=yuv420p",
-        "-c:v",
-        "libx264",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as error:
-        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
+        if request.format == "mp4":
+            run_ffmpeg_mp4(list_path, output_path, request.fps)
+        else:
+            run_ffmpeg_gif(list_path, output_path, request.fps, video_dir, requested_name)
     finally:
         list_path.unlink(missing_ok=True)
 
@@ -776,6 +882,74 @@ def generate_video(
     }
 
 
+def run_ffmpeg_mp4(list_path: Path, output_path: Path, fps: int) -> None:
+    command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-vf", f"fps={fps},format=yuv420p",
+        "-c:v", "libx264", "-movflags", "+faststart",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
+
+
+def run_ffmpeg_gif(list_path: Path, output_path: Path, fps: int, work_dir: Path, base_name: str) -> None:
+    palette_path = work_dir / f"{base_name}-palette.png"
+    palette_command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-vf", f"fps={fps},scale=720:-1:flags=lanczos,palettegen",
+        str(palette_path),
+    ]
+    encode_command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-i", str(palette_path),
+        "-filter_complex", f"fps={fps},scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(palette_command, check=True, capture_output=True, text=True)
+        subprocess.run(encode_command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
+    finally:
+        palette_path.unlink(missing_ok=True)
+
+
+SUPPORTED_VIDEO_FORMATS = {".mp4": "video/mp4", ".gif": "image/gif"}
+
+
+@app.get("/api/cameras/{camera_id}/videos")
+def list_videos(camera_id: str) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    video_dir = DATA_DIR / "videos" / camera_id
+    if not video_dir.exists():
+        return {"videos": []}
+    items = []
+    for entry in video_dir.iterdir():
+        if not entry.is_file():
+            continue
+        suffix = entry.suffix.lower()
+        if suffix not in (".mp4", ".gif"):
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        items.append({
+            "filename": entry.name,
+            "size_bytes": stat.st_size,
+            "format": suffix.lstrip("."),
+            "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    items.sort(key=lambda v: v["created_at"], reverse=True)
+    return {"videos": items}
+
+
 @app.get("/api/cameras/{camera_id}/videos/{filename}")
 def read_video(
     camera_id: str,
@@ -784,9 +958,21 @@ def read_video(
     camera_id = safe_identifier(camera_id)
     filename = safe_identifier(filename)
     path = DATA_DIR / "videos" / camera_id / filename
-    if path.suffix != ".mp4" or not path.exists():
+    media_type = SUPPORTED_VIDEO_FORMATS.get(path.suffix)
+    if media_type is None or not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
-    return FileResponse(path, media_type="video/mp4")
+    return FileResponse(path, media_type=media_type)
+
+
+@app.delete("/api/cameras/{camera_id}/videos/{filename}", status_code=204)
+def delete_video(camera_id: str, filename: str) -> None:
+    camera_id = safe_identifier(camera_id)
+    filename = safe_identifier(filename)
+    path = DATA_DIR / "videos" / camera_id / filename
+    if path.suffix not in SUPPORTED_VIDEO_FORMATS or not path.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+    path.unlink(missing_ok=True)
+    return None
 
 
 @app.api_route(
@@ -802,4 +988,4 @@ def api_not_found(path: str) -> None:
 def spa_fallback(path: str) -> FileResponse:
     if path.startswith("api/") or path.startswith("static/"):
         raise HTTPException(status_code=404)
-    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+    return FileResponse(STATIC_DIR / "v2" / "index.html", media_type="text/html")

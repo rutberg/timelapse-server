@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import shutil
@@ -15,9 +16,9 @@ import tarfile
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -60,6 +61,7 @@ class AgentState:
     pending_bytes: int = 0
     in_schedule: bool = True
     local_hour: int = 0
+    current_light: Optional[int] = None
 
 
 def next_allowed_hour(current_hour: int, capture_hours: list) -> int:
@@ -97,6 +99,85 @@ def resolve_max_pending_bytes(settings: Dict[str, Any], work_dir: Path) -> int:
     return int(configured)
 
 
+def solar_window(
+    today: date,
+    latitude: float,
+    longitude: float,
+    utc_offset_hours: float = 0.0,
+) -> Optional[Tuple[int, int]]:
+    """Return (sunrise_hour, sunset_hour_exclusive) in local time, or None.
+
+    Uses the NOAA solar position approximation. Resolution is hour-rounded —
+    enough for capture-window scheduling. Returns:
+        (0, 24) when the sun never sets (polar day),
+        None    when the sun never rises (polar night).
+
+    sunset_hour_exclusive uses ceil(), so a sunset at 22:08 yields 23 —
+    meaning hours 0..22 are included, which correctly covers the 22:xx window.
+    """
+    n = today.timetuple().tm_yday
+    gamma = 2 * math.pi / 365 * (n - 1)
+
+    # Equation of time (minutes)
+    eqtime = 229.18 * (
+        0.000075
+        + 0.001868 * math.cos(gamma)
+        - 0.032077 * math.sin(gamma)
+        - 0.014615 * math.cos(2 * gamma)
+        - 0.040849 * math.sin(2 * gamma)
+    )
+
+    # Solar declination (radians)
+    decl = (
+        0.006918
+        - 0.399912 * math.cos(gamma)
+        + 0.070257 * math.sin(gamma)
+        - 0.006758 * math.cos(2 * gamma)
+        + 0.000907 * math.sin(2 * gamma)
+        - 0.002697 * math.cos(3 * gamma)
+        + 0.00148 * math.sin(3 * gamma)
+    )
+
+    lat_rad = math.radians(latitude)
+    # Hour angle at sunrise/sunset (zenith = 90.833° to include refraction).
+    cos_ha = (math.cos(math.radians(90.833)) - math.sin(lat_rad) * math.sin(decl)) / (
+        math.cos(lat_rad) * math.cos(decl)
+    )
+    if cos_ha < -1.0:
+        return (0, 24)         # polar day
+    if cos_ha > 1.0:
+        return None            # polar night
+    ha = math.degrees(math.acos(cos_ha))
+
+    # Solar noon (UTC minutes)
+    solar_noon_utc_min = 720 - 4 * longitude - eqtime
+    sunrise_utc_min = solar_noon_utc_min - 4 * ha
+    sunset_utc_min = solar_noon_utc_min + 4 * ha
+
+    sunrise_local_h = (sunrise_utc_min / 60.0) + utc_offset_hours
+    sunset_local_h = (sunset_utc_min / 60.0) + utc_offset_hours
+
+    sunrise_h = max(0, min(23, int(math.floor(sunrise_local_h))))
+    sunset_h = max(1, min(24, int(math.ceil(sunset_local_h))))
+    return (sunrise_h, sunset_h)
+
+
+def daylight_capture_hours(
+    today: date,
+    latitude: Optional[float],
+    longitude: Optional[float],
+    utc_offset_hours: float = 0.0,
+) -> List[int]:
+    """Hours of day to capture in 'daylight' mode. Falls back to 06:00–20:00."""
+    if latitude is None or longitude is None:
+        return list(range(6, 20))
+    window = solar_window(today, latitude, longitude, utc_offset_hours)
+    if window is None:
+        return []
+    sunrise_h, sunset_h = window
+    return list(range(sunrise_h, sunset_h))
+
+
 def hour_in_schedule(now: datetime, capture_hours: Optional[list]) -> bool:
     """Return True if `now`'s hour is within the schedule (or no schedule).
 
@@ -107,6 +188,23 @@ def hour_in_schedule(now: datetime, capture_hours: Optional[list]) -> bool:
     if not capture_hours:
         return True
     return now.hour in set(capture_hours)
+
+
+def is_in_schedule(
+    now: datetime,
+    capture_hours: Optional[list],
+    schedule_days: Optional[list] = None,
+) -> bool:
+    """Combined gate: hour-of-day AND ISO-weekday must both allow capture.
+
+    capture_hours: None = no hour restriction; list of 0-23 ints otherwise.
+    schedule_days: None = every day; list of 1-7 ISO weekdays otherwise.
+                   Empty list (length zero, not None) means "paused — no day enabled".
+    """
+    if schedule_days is not None:
+        if now.isoweekday() not in set(schedule_days):
+            return False
+    return hour_in_schedule(now, capture_hours)
 
 
 def measure_pending(work_dir: Path) -> tuple[int, int]:
@@ -317,6 +415,33 @@ def check_for_update(
     return True
 
 
+def read_wifi_rssi() -> Optional[int]:
+    """Read Wi-Fi RSSI in dBm from `iw dev`. Linux-only; returns None on any failure.
+
+    Parses the line `signal: -57 dBm` from `iw dev wlan0 link` output.
+    """
+    if not shutil.which("iw"):
+        return None
+    interface = os.environ.get("TIMELAPSE_WIFI_IFACE", "wlan0")
+    try:
+        result = subprocess.run(
+            ["iw", "dev", interface, "link"],
+            check=False, capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("signal:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/checkin"
     payload = {
@@ -329,6 +454,8 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "pending_bytes": state.pending_bytes,
         "in_schedule": state.in_schedule,
         "local_hour": state.local_hour,
+        "current_light": state.current_light,
+        "signal_dbm": read_wifi_rssi(),
     }
     try:
         post_json(url, payload)
@@ -410,6 +537,50 @@ def build_capture_command(command: str, output_path: Path, config: Dict[str, Any
     if config.get("image_height"):
         capture_command.extend(["--height", str(config["image_height"])])
     return capture_command
+
+
+def mean_y_from_yuv(raw: bytes, width: int, height: int) -> Optional[int]:
+    """Mean Y luminance (0-255) from a raw YUV420 buffer's Y plane.
+
+    YUV420 stores: width*height bytes of Y, then width*height/4 of U, then
+    width*height/4 of V. We only need the Y plane.
+    """
+    y_plane_size = width * height
+    if len(raw) < y_plane_size:
+        return None
+    plane = raw[:y_plane_size]
+    return sum(plane) // len(plane)
+
+
+def sample_light_level(command: str, width: int = 64, height: int = 48) -> Optional[int]:
+    """Capture a tiny YUV thumbnail and return the mean Y luminance (0-255).
+
+    Returns None if no capture tool is available or if the tool fails.
+    """
+    if command.endswith("raspistill"):
+        cmd = [command, "-n", "-t", "200", "-w", str(width), "-h", str(height),
+               "-e", "yuv", "-o", "-"]
+    else:
+        cmd = [command, "--nopreview", "--timeout", "200",
+               "--width", str(width), "--height", str(height),
+               "--encoding", "yuv420", "--output", "-"]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, timeout=5)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+        logging.warning("Light sample failed: %s", error)
+        return None
+    return mean_y_from_yuv(result.stdout, width, height)
+
+
+def should_capture_for_scene(current_light: Optional[int], threshold: Optional[int]) -> bool:
+    """Capture decision for scene-light mode.
+
+    Conservative defaults: missing threshold or missing reading both return True
+    (don't gate captures out due to misconfiguration or transient sample failures).
+    """
+    if threshold is None or current_light is None:
+        return True
+    return current_light >= threshold
 
 
 def now_local_iso() -> str:
@@ -502,9 +673,20 @@ def run_agent(settings: Dict[str, Any]) -> None:
         AGENT_VERSION, settings["camera_id"], max_pending_bytes,
     )
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
-    startup_now = datetime.now()
+    startup_now = datetime.now().astimezone()
     state.local_hour = startup_now.hour
-    state.in_schedule = hour_in_schedule(startup_now, remote_config.get("capture_hours"))
+    startup_schedule_mode = remote_config.get("schedule_mode")
+    if startup_schedule_mode == "daylight":
+        startup_offset_h = startup_now.utcoffset().total_seconds() / 3600
+        startup_effective_hours = daylight_capture_hours(
+            today=startup_now.date(),
+            latitude=remote_config.get("latitude"),
+            longitude=remote_config.get("longitude"),
+            utc_offset_hours=startup_offset_h,
+        )
+    else:
+        startup_effective_hours = remote_config.get("capture_hours")
+    state.in_schedule = is_in_schedule(startup_now, startup_effective_hours, remote_config.get("schedule_days"))
     post_checkin(settings, state)
 
     while True:
@@ -529,27 +711,53 @@ def run_agent(settings: Dict[str, Any]) -> None:
 
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))
-        capture_hours = remote_config.get("capture_hours")
-        local_now = datetime.now()
-        in_schedule = hour_in_schedule(local_now, capture_hours)
+        local_now = datetime.now().astimezone()
+        schedule_mode = remote_config.get("schedule_mode")
+        if schedule_mode == "daylight":
+            offset_h = local_now.utcoffset().total_seconds() / 3600
+            effective_hours = daylight_capture_hours(
+                today=local_now.date(),
+                latitude=remote_config.get("latitude"),
+                longitude=remote_config.get("longitude"),
+                utc_offset_hours=offset_h,
+            )
+        else:
+            effective_hours = remote_config.get("capture_hours")
+        in_schedule = is_in_schedule(local_now, effective_hours, remote_config.get("schedule_days"))
         # Update state every loop so heartbeat reflects the current view.
         state.local_hour = local_now.hour
         if in_schedule != state.in_schedule:
             state.in_schedule = in_schedule
-            if not in_schedule and capture_hours:
-                next_hour = next_allowed_hour(local_now.hour, capture_hours)
+            if not in_schedule and effective_hours:
+                next_hour = next_allowed_hour(local_now.hour, effective_hours)
                 logging.info(
                     "Capture paused — outside schedule (local hour %d, allowed %s, resume at %02d:00)",
-                    local_now.hour, capture_hours, next_hour,
+                    local_now.hour, effective_hours, next_hour,
                 )
-            elif in_schedule and capture_hours:
+            elif in_schedule and effective_hours:
                 logging.info(
                     "Capture resumed — local hour %d is within schedule %s",
-                    local_now.hour, capture_hours,
+                    local_now.hour, effective_hours,
                 )
         if enabled and not in_schedule and now >= next_capture:
             # Outside the schedule: skip this slot, re-check at the next interval.
             next_capture = now + interval_seconds
+        # Always sample scene luminance before each capture so the user can see
+        # a live reading regardless of schedule_mode. Sampling adds ~200ms;
+        # negligible compared to the capture interval.
+        if enabled and in_schedule and now >= next_capture:
+            tool = find_capture_command()
+            if tool:
+                state.current_light = sample_light_level(tool)
+            # Scene-light mode: skip the actual capture if below threshold.
+            if schedule_mode == "scene" and not should_capture_for_scene(
+                state.current_light, remote_config.get("light_threshold")
+            ):
+                logging.info(
+                    "Scene-light gate: Y=%s < threshold=%s, skipping",
+                    state.current_light, remote_config.get("light_threshold"),
+                )
+                next_capture = now + interval_seconds
         if enabled and in_schedule and now >= next_capture:
             try:
                 image_path = capture_frame(work_dir, remote_config)
