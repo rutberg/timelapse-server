@@ -1,3 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timelapse-system"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+# This repo is run from source. Keep `pip install .` metadata-only so tools
+# like Codex automatic setup do not try to auto-package `agent/` and `server/`.
+packages = []
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["server", "agent"]
