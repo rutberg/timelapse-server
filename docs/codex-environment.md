@@ -11,13 +11,15 @@ Use these settings when creating the Codex environment for this repository.
 
 ## Pre-installed Packages
 
-The setup script installs the project-specific Debian packages:
+The setup script tries to install the project-specific Debian packages:
 
 - `ca-certificates`
 - `ffmpeg`
 - `openssh-client`
 
 `ffmpeg` is required by video-generation code. `openssh-client` provides `ssh`, `scp`, and `ssh-keygen`, which the provisioning code and tests expect.
+
+If the Codex setup proxy blocks `apt-get`, the script logs a warning and continues with the Python environment so tests can still run.
 
 ## Environment Variables
 
@@ -35,6 +37,7 @@ Optional:
 
 ```bash
 CODEX_RUN_TESTS_DURING_SETUP=1
+CODEX_SKIP_APT=1
 LOG_LEVEL=INFO
 ```
 

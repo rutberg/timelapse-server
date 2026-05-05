@@ -4,7 +4,7 @@ This is a Python timelapse system with a FastAPI server in `server/` and a Raspb
 
 ## Setup
 
-Use `scripts/codex-setup.sh` in Codex cloud environments. It creates `.venv-dev`, installs `requirements-dev.txt`, and installs the system packages needed by server tests and provisioning code.
+Use `scripts/codex-setup.sh` in Codex cloud environments. It creates `.venv-dev`, installs `requirements-dev.txt`, and tries to install the system packages needed by video rendering and provisioning code. If `apt-get` is blocked in the cloud setup environment, the script continues so Python tests can still run.
 
 Useful environment defaults:
 

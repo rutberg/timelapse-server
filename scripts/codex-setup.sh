@@ -7,17 +7,24 @@ PYTHON="${PYTHON:-python3}"
 APT_PACKAGES=(ca-certificates ffmpeg openssh-client)
 
 install_apt_packages() {
+  if [ "${CODEX_SKIP_APT:-0}" = "1" ]; then
+    echo "CODEX_SKIP_APT=1; skipping system package install."
+    return
+  fi
+
   if ! command -v apt-get >/dev/null 2>&1; then
     echo "apt-get not found; skipping system package install."
     return
   fi
 
   if [ "$(id -u)" -eq 0 ]; then
-    apt-get update
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_PACKAGES[@]}"
+    apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_PACKAGES[@]}" || {
+      echo "Warning: apt package install failed; continuing with Python setup." >&2
+    }
   elif command -v sudo >/dev/null 2>&1; then
-    sudo apt-get update
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_PACKAGES[@]}"
+    sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_PACKAGES[@]}" || {
+      echo "Warning: apt package install failed; continuing with Python setup." >&2
+    }
   else
     echo "No root access or sudo; skipping system package install."
   fi
