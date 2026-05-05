@@ -450,3 +450,28 @@ class TestShouldSampleLight:
 
     def test_false_for_none(self):
         assert should_sample_light(None) is False
+
+
+from timelapse_agent import gphoto2_disable_autopoweroff
+
+
+class TestDisableAutopoweroff:
+    def test_sets_autopoweroff_to_zero(self):
+        completed = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("timelapse_agent.subprocess.run", return_value=completed) as mock_run:
+            gphoto2_disable_autopoweroff()
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "gphoto2"
+        assert "--set-config" in cmd
+        # Canon EOS bodies expose this as autopoweroff; setting to 0 disables it.
+        assert any("autopoweroff=0" in part for part in cmd)
+
+    def test_swallows_unsupported_config_error(self):
+        # Some camera bodies don't expose autopoweroff. That's fine — log and move on.
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd="gphoto2",
+            stderr="ERROR: Property autopoweroff not found.\n",
+        )
+        with patch("timelapse_agent.subprocess.run", side_effect=err):
+            # Should NOT raise.
+            gphoto2_disable_autopoweroff()

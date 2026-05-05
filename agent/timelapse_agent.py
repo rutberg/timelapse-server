@@ -685,6 +685,21 @@ def gphoto2_delete_file(ref: CameraFileRef, timeout: int = 30) -> None:
         raise
 
 
+def gphoto2_disable_autopoweroff(timeout: int = 10) -> None:
+    """Disable the camera's auto-poweroff so the USB connection stays alive.
+
+    Best-effort: not all camera bodies expose this property. Failures are
+    logged and swallowed.
+    """
+    try:
+        subprocess.run(
+            ["gphoto2", "--set-config", "autopoweroff=0"],
+            check=True, capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+        logging.info("Could not disable camera autopoweroff (often harmless): %s", error)
+
+
 def measure_camera_pending(work_dir: Path) -> int:
     """Number of images queued on the camera awaiting upload."""
     return len(load_camera_pending(work_dir))
@@ -938,6 +953,8 @@ def run_agent(settings: Dict[str, Any]) -> None:
         "Agent v%s started for camera_id=%s (max_pending_bytes=%s)",
         AGENT_VERSION, settings["camera_id"], max_pending_bytes,
     )
+    if resolve_active_backend(remote_config) == "gphoto2":
+        gphoto2_disable_autopoweroff()
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
     state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
