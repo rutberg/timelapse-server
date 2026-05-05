@@ -589,6 +589,12 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/server-info")
+def server_info(request: Request) -> Dict[str, Any]:
+    url = resolve_public_server_url(str(request.base_url).rstrip("/"))
+    return {"server_url": url, "lan_ip": detect_lan_ip()}
+
+
 def agent_store() -> AgentStore:
     return AgentStore(DATA_DIR)
 

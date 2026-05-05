@@ -110,6 +110,36 @@ function renderSideCard(camera) {
     </a>`;
 }
 
+function provisioningPill(agent) {
+  if (agent.status === "provisioning") return `<span class="pill warn"><span class="dot amber pulse"></span>PROVISIONING</span>`;
+  if (agent.status === "failed")       return `<span class="pill bad"><span class="dot red"></span>FAILED</span>`;
+  return `<span class="pill off"><span class="dot grey"></span>PENDING</span>`;
+}
+
+function renderProvisioningCard(agent, onDecommission) {
+  const display = agent.display_name || agent.agent_id;
+  const err = agent.last_provision_error;
+  return `
+    <div class="card" style="padding:14px;display:flex;gap:12px;align-items:flex-start" data-agent-id="${escapeHtml(agent.agent_id)}">
+      <div class="cam-canvas" style="width:120px;flex-shrink:0;aspect-ratio:16/9;border-radius:3px">
+        <div class="scene ${["scene-day","scene-overcast","scene-dusk","scene-night"][[...agent.agent_id].reduce((s,c)=>s+c.charCodeAt(0),0)%4]}" style="position:absolute;inset:0"></div>
+        <div class="placeholder">Waiting for first checkin</div>
+      </div>
+      <div class="grow" style="min-width:0">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-weight:500;font-size:13px">${escapeHtml(display)}</span>
+          ${provisioningPill(agent)}
+        </div>
+        <div class="mono small" style="color:var(--soft);margin-top:3px">${escapeHtml(agent.agent_id)} · ${escapeHtml(agent.expected_hostname)}.local</div>
+        ${err ? `<div class="mono small" style="color:var(--red);margin-top:4px;white-space:pre-wrap;word-break:break-all">${escapeHtml(err)}</div>` : ""}
+      </div>
+      <div class="row" style="flex-shrink:0;gap:6px">
+        ${agent.status === "failed" ? `<a class="btn ghost sm" href="#/agents/new">${icon("refresh",11)}Re-provision</a>` : ""}
+        <button class="btn danger sm" data-decommission="${escapeHtml(agent.agent_id)}">Decommission</button>
+      </div>
+    </div>`;
+}
+
 function renderEmpty() {
   return `
     <div class="empty">
@@ -130,11 +160,18 @@ async function renderDashboard(root) {
 
   async function load() {
     try {
-      const data = await api.fetchJson("/api/cameras");
+      const [data, agentsData] = await Promise.all([
+        api.fetchJson("/api/cameras"),
+        api.fetchJson("/api/agents").catch(() => ({ agents: [] })),
+      ]);
       const cameras = data.cameras || [];
       const stats = data.stats || {};
 
-      if (cameras.length === 0) {
+      // Agents that haven't checked in yet (no camera entry) should appear as pending cards.
+      const cameraIds = new Set(cameras.map(c => c.camera_id));
+      const pendingAgents = (agentsData.agents || []).filter(a => !cameraIds.has(a.agent_id));
+
+      if (cameras.length === 0 && pendingAgents.length === 0) {
         root.innerHTML = renderEmpty();
         return;
       }
@@ -142,8 +179,8 @@ async function renderDashboard(root) {
       // Pick "featured" camera: prefer first online, else first failed, else first.
       const live = cameras.find(c => statusKind(c.status) === "live");
       const failing = cameras.find(c => statusKind(c.status) === "failed");
-      const hero = live || failing || cameras[0];
-      const rest = cameras.filter(c => c.camera_id !== hero.camera_id);
+      const hero = cameras.length > 0 ? (live || failing || cameras[0]) : null;
+      const rest = hero ? cameras.filter(c => c.camera_id !== hero.camera_id) : [];
 
       const liveCount = cameras.filter(c => statusKind(c.status) === "live").length;
       const failingCount = cameras.filter(c => statusKind(c.status) === "failed").length;
@@ -156,11 +193,12 @@ async function renderDashboard(root) {
 
       const today = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
 
+      const totalCameraCount = cameras.length + pendingAgents.length;
       root.innerHTML = `
         <div style="padding:20px 24px;border-bottom:1px solid var(--border)">
           <div class="lbl">Overview · ${escapeHtml(today)}</div>
           <div class="stat-grid" style="margin-top:12px">
-            ${statCard("Live cameras", String(liveCount), `of ${cameras.length}`, liveCount > 0 ? "green" : null)}
+            ${statCard("Live cameras", String(liveCount), `of ${totalCameraCount}`, liveCount > 0 ? "green" : null)}
             ${statCard("Total frames", fmtNum(totalImages), totalQueued > 0 ? `${fmtNum(totalQueued)} pending` : "across all cameras", totalQueued > 0 ? "warn" : null)}
             ${statCard("Storage",
                 storageUsed != null ? formatBytes(storageUsed) : "—",
@@ -184,6 +222,15 @@ async function renderDashboard(root) {
             </div>
           </div>` : ""}
 
+        ${pendingAgents.length > 0 ? `
+          <div style="padding:14px 24px 0">
+            <div class="lbl" style="margin-bottom:10px">Provisioning · ${pendingAgents.length}</div>
+            <div class="col" style="gap:8px">
+              ${pendingAgents.map(a => renderProvisioningCard(a)).join("")}
+            </div>
+          </div>` : ""}
+
+        ${cameras.length > 0 ? `
         <div class="hero-grid">
           ${renderHero(hero)}
 
@@ -193,7 +240,7 @@ async function renderDashboard(root) {
               ? `<div class="small">Just the one for now.</div>`
               : rest.map(renderSideCard).join("")}
           </div>
-        </div>
+        </div>` : ""}
       `;
 
       // Wire the "Render" button on the hero card.
@@ -204,6 +251,18 @@ async function renderDashboard(root) {
           openRenderModal(hero.camera_id);
         });
       }
+
+      // Wire decommission buttons on provisioning cards.
+      root.querySelectorAll("[data-decommission]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const agentId = btn.dataset.decommission;
+          if (!confirm(`Decommission "${agentId}"? This will delete the agent record, SSH keys, and any captured images.`)) return;
+          try {
+            await api.fetchJson(`/api/cameras/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+          } catch (_) {}
+          await load();
+        });
+      });
     } catch (error) {
       root.innerHTML = `
         <div class="empty">

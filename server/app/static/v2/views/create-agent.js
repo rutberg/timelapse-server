@@ -24,6 +24,8 @@ async function renderWizard(root) {
     retryIp: "",
     nameError: "",
     copied: false,
+    serverUrl: "",
+    lanIp: "",
   };
 
   function effectiveHostname() {
@@ -100,6 +102,28 @@ async function renderWizard(root) {
       </div>`;
   }
 
+  function renderServerUrlInfo() {
+    const url = state.serverUrl;
+    if (!url) return "";
+    let host = "";
+    try { host = new URL(url).hostname; } catch (_) { host = url; }
+    const isCgnat = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host);
+    const warnHtml = isCgnat
+      ? `<div class="banner bad" style="margin-top:8px">${icon("alert",14)}<div class="small" style="line-height:1.55">
+            This looks like a <strong>VPN or Tailscale address</strong>. The Pi won't be able to reach it
+            unless Tailscale is installed on the Pi too.
+            ${state.lanIp ? `Your detected LAN IP is <span class="mono" style="color:var(--accent-2)">${escapeHtml(state.lanIp)}</span> — re-open this page via that address to bake the correct URL.` : ""}
+          </div></div>`
+      : "";
+    return `
+      <div>
+        <div class="lbl">Server URL the Pi will connect to</div>
+        <div class="code-block" style="margin-top:6px">${escapeHtml(url)}</div>
+        <div class="small" style="margin-top:6px;color:var(--soft)">This is baked into the Pi's config during provisioning. It must be reachable from the Pi's local network.</div>
+        ${warnHtml}
+      </div>`;
+  }
+
   function renderStep2() {
     const host = effectiveHostname();
     const pubkey = state.created?.public_key || "";
@@ -139,6 +163,7 @@ async function renderWizard(root) {
           <div class="code-block" style="margin-top:6px">${escapeHtml(pubkey)}</div>
           <div class="small" style="margin-top:6px">Paste into Imager's "Set authorized_keys for SSH" field. Matching private key stays on this server only.</div>
         </div>
+        ${renderServerUrlInfo()}
         <div class="banner warn">${icon("clock",14)}<div class="small" style="line-height:1.55">Flash, insert, power on. <strong>Wait 60–90 seconds</strong> for first boot before continuing.</div></div>
         <div style="border-top:1px solid var(--border);padding-top:14px">
           <label class="field">
@@ -329,6 +354,12 @@ async function renderWizard(root) {
     }
     paint();
   }
+
+  api.fetchJson("/api/server-info").then(info => {
+    state.serverUrl = info.server_url || "";
+    state.lanIp = info.lan_ip || "";
+    if (state.step === 2) paint();
+  }).catch(() => {});
 
   paint();
 }
