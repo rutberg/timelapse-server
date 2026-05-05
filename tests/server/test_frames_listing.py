@@ -49,6 +49,9 @@ def test_list_frames_returns_newest_first(client, tmp_data_dir):
     assert body["frames"][0]["url"] == (
         "/api/cameras/cam-frames/frames/2026-05-05/20260505T080000.jpg"
     )
+    assert body["frames"][0]["thumbnail_url"] == (
+        "/api/cameras/cam-frames/frames/2026-05-05/20260505T080000.jpg/thumbnail"
+    )
     assert body["total"] == 2
     assert body["returned"] == 2
     assert body["has_more"] is False
@@ -160,6 +163,38 @@ def test_read_frame_serves_jpeg(client, tmp_data_dir):
     assert response.content == b"jpeg-bytes"
 
 
+def test_read_frame_thumbnail_serves_cached_jpeg(client, tmp_data_dir):
+    _seed_frame(tmp_data_dir, "cam-thumb", "2026-05-04", "20260504T143000.jpg", b"jpeg-bytes")
+    thumb_dir = tmp_data_dir / "thumbnails" / "cam-thumb" / "2026-05-04"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    (thumb_dir / "20260504T143000.jpg").write_bytes(b"thumb-bytes")
+
+    response = client.get("/api/cameras/cam-thumb/frames/2026-05-04/20260504T143000.jpg/thumbnail")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == b"thumb-bytes"
+
+
+def test_read_frame_thumbnail_falls_back_to_original_without_generator(
+    client,
+    tmp_data_dir,
+    monkeypatch,
+):
+    import app.main as server_main
+
+    monkeypatch.setattr(server_main.shutil, "which", lambda _name: None)
+    _seed_frame(tmp_data_dir, "cam-thumb-fallback", "2026-05-04", "20260504T143000.jpg", b"jpeg-bytes")
+
+    response = client.get(
+        "/api/cameras/cam-thumb-fallback/frames/2026-05-04/20260504T143000.jpg/thumbnail"
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == b"jpeg-bytes"
+
+
 def test_read_missing_frame_returns_404(client):
     response = client.get("/api/cameras/cam-read/frames/2026-05-04/20260504T143000.jpg")
     assert response.status_code == 404
@@ -167,12 +202,18 @@ def test_read_missing_frame_returns_404(client):
 
 def test_delete_frame(client, tmp_data_dir):
     path = _seed_frame(tmp_data_dir, "cam-del", "2026-05-04", "20260504T143000.jpg")
+    thumb_dir = tmp_data_dir / "thumbnails" / "cam-del" / "2026-05-04"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    thumb_path = thumb_dir / "20260504T143000.jpg"
+    thumb_path.write_bytes(b"thumb")
     assert path.exists()
+    assert thumb_path.exists()
 
     response = client.delete("/api/cameras/cam-del/frames/2026-05-04/20260504T143000.jpg")
 
     assert response.status_code == 204
     assert not path.exists()
+    assert not thumb_path.exists()
 
 
 def test_delete_missing_frame_returns_404(client):

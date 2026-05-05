@@ -631,7 +631,7 @@ async function renderCamera(root, hash) {
     const stamp = frameStamp(frame);
     return `
       <button class="frame-browser-tile ${selected ? "selected" : ""}" data-frame-cursor="${escapeHtml(frame.cursor)}" type="button">
-        <img src="${escapeHtml(frame.url)}" alt="${escapeHtml(stamp)}" loading="lazy"/>
+        <img src="${escapeHtml(framePreviewUrl(frame))}" alt="${escapeHtml(stamp)}" loading="lazy" onerror="this.onerror=null;this.src='${escapeHtml(frame.url)}'"/>
         <span class="frame-check"></span>
         <span class="frame-stamp">${escapeHtml(stamp)}</span>
       </button>`;
@@ -701,7 +701,7 @@ async function renderCamera(root, hash) {
     cursor.style.left = `${ratio * 100}%`;
     preview.style.left = `${ratio * 100}%`;
     if (frame) {
-      preview.innerHTML = `<img src="${escapeHtml(frame.url)}" alt="${escapeHtml(frameStamp(frame))}"/><div class="mono">${escapeHtml(frameStamp(frame))}</div>`;
+      preview.innerHTML = `<img src="${escapeHtml(framePreviewUrl(frame))}" alt="${escapeHtml(frameStamp(frame))}" onerror="this.onerror=null;this.src='${escapeHtml(frame.url)}'"/><div class="mono">${escapeHtml(frameStamp(frame))}</div>`;
     }
   }
 
@@ -876,7 +876,7 @@ async function renderCamera(root, hash) {
       <img class="frames-lb-img" src="${escapeHtml(frame.url)}" alt="${escapeHtml(frameStamp(frame, true))}"/>
       <button class="frames-lb-arrow next" type="button">›</button>
       <div class="frames-lb-strip">
-        ${nearby.map(item => `<button class="frames-lb-thumb ${item.cursor === frame.cursor ? "active" : ""}" data-lb-cursor="${escapeHtml(item.cursor)}" type="button"><img src="${escapeHtml(item.url)}" alt="${escapeHtml(frameStamp(item))}"/></button>`).join("")}
+        ${nearby.map(item => `<button class="frames-lb-thumb ${item.cursor === frame.cursor ? "active" : ""}" data-lb-cursor="${escapeHtml(item.cursor)}" type="button"><img src="${escapeHtml(framePreviewUrl(item))}" alt="${escapeHtml(frameStamp(item))}" onerror="this.onerror=null;this.src='${escapeHtml(item.url)}'"/></button>`).join("")}
       </div>
       <div class="frames-lb-meta">
         <div>
@@ -963,6 +963,10 @@ async function renderCamera(root, hash) {
 
   function frameHour(frame) {
     return Math.floor(frameMinute(frame) / 60);
+  }
+
+  function framePreviewUrl(frame) {
+    return frame?.thumbnail_url || frame?.url || "";
   }
 
   function frameMinute(frame) {
