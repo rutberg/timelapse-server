@@ -700,6 +700,103 @@ def gphoto2_disable_autopoweroff(timeout: int = 10) -> None:
         logging.info("Could not disable camera autopoweroff (often harmless): %s", error)
 
 
+_DSLR_INIT_KEY_MAP: Dict[str, str] = {
+    "capture_target": "capturetarget",
+    "drive_mode": "drivemode",
+    "focus_mode": "focusmode",
+}
+
+_DSLR_SEQUENCE_KEY_MAP: Dict[str, str] = {
+    "shutterspeed": "shutterspeed",
+    "aperture": "aperture",
+    "iso": "iso",
+    "exposure_compensation": "exposurecompensation",
+    "whitebalance": "whitebalance",
+    "image_format": "imageformat",
+}
+
+_DSLR_CHOICE_KEYS: List[str] = [
+    "shutterspeed", "aperture", "iso", "exposurecompensation",
+    "whitebalance", "imageformat", "capturetarget", "drivemode", "focusmode",
+]
+
+
+def gphoto2_read_choices(keys: Optional[List[str]] = None) -> Dict[str, List[str]]:
+    if keys is None:
+        keys = _DSLR_CHOICE_KEYS
+    choices: Dict[str, List[str]] = {}
+    for key in keys:
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--get-config", key],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        values = []
+        for line in result.stdout.splitlines():
+            if line.startswith("Choice:"):
+                parts = line.split(None, 2)
+                if len(parts) >= 3:
+                    values.append(parts[2])
+        if values:
+            choices[key] = values
+    return choices
+
+
+def gphoto2_apply_init_settings(dslr: Dict[str, Any]) -> None:
+    for field_name, gphoto_key in _DSLR_INIT_KEY_MAP.items():
+        value = dslr.get(field_name)
+        if value is None:
+            continue
+        try:
+            subprocess.run(
+                ["gphoto2", "--set-config", f"{gphoto_key}={value}"],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as err:
+            logging.warning("Could not set DSLR init setting %s=%s: %s", gphoto_key, value, err)
+
+
+def gphoto2_apply_sequence_settings(dslr: Dict[str, Any]) -> None:
+    for field_name, gphoto_key in _DSLR_SEQUENCE_KEY_MAP.items():
+        value = dslr.get(field_name)
+        if value is None:
+            continue
+        try:
+            subprocess.run(
+                ["gphoto2", "--set-config", f"{gphoto_key}={value}"],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as err:
+            logging.warning("Could not set DSLR sequence setting %s=%s: %s", gphoto_key, value, err)
+
+
+def _gphoto2_get_current(key: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--get-config", key],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Current:"):
+                return line.split(":", 1)[1].strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def gphoto2_read_telemetry() -> Dict[str, Any]:
+    shots_str = _gphoto2_get_current("availableshots")
+    counter_str = _gphoto2_get_current("shuttercounter")
+    return {
+        "battery_level": _gphoto2_get_current("batterylevel"),
+        "available_shots": int(shots_str) if shots_str and shots_str.isdigit() else None,
+        "shutter_counter": int(counter_str) if counter_str and counter_str.isdigit() else None,
+        "exposure_mode": _gphoto2_get_current("autoexposuremode"),
+    }
+
+
 def measure_camera_pending(work_dir: Path) -> int:
     """Number of images queued on the camera awaiting upload."""
     return len(load_camera_pending(work_dir))

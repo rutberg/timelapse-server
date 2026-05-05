@@ -6,6 +6,10 @@ import pytest
 from timelapse_agent import (
     gphoto2_available,
     resolve_active_backend,
+    gphoto2_read_choices,
+    gphoto2_apply_init_settings,
+    gphoto2_apply_sequence_settings,
+    gphoto2_read_telemetry,
 )
 
 
@@ -475,3 +479,114 @@ class TestDisableAutopoweroff:
         with patch("timelapse_agent.subprocess.run", side_effect=err):
             # Should NOT raise.
             gphoto2_disable_autopoweroff()
+
+
+_CHOICE_OUTPUT = """\
+Label: ISO Speed
+Readonly: 0
+Type: RADIO
+Current: 400
+Choice: 0 Auto
+Choice: 1 100
+Choice: 2 200
+Choice: 3 400
+"""
+
+
+class TestGphoto2ReadChoices:
+    def test_parses_choice_lines(self):
+        completed = MagicMock(returncode=0, stdout=_CHOICE_OUTPUT, stderr="")
+        with patch("timelapse_agent.subprocess.run", return_value=completed):
+            result = gphoto2_read_choices(["iso"])
+        assert result == {"iso": ["Auto", "100", "200", "400"]}
+
+    def test_returns_empty_dict_on_subprocess_error(self):
+        with patch("timelapse_agent.subprocess.run", side_effect=subprocess.CalledProcessError(1, "gphoto2")):
+            result = gphoto2_read_choices(["iso"])
+        assert result == {}
+
+    def test_skips_key_on_timeout(self):
+        with patch("timelapse_agent.subprocess.run", side_effect=subprocess.TimeoutExpired("gphoto2", 10)):
+            result = gphoto2_read_choices(["iso", "shutterspeed"])
+        assert result == {}
+
+    def test_skips_key_with_no_choices(self):
+        no_choices = "Label: Battery Level\nReadonly: 1\nType: TEXT\nCurrent: 87%\n"
+        completed = MagicMock(returncode=0, stdout=no_choices, stderr="")
+        with patch("timelapse_agent.subprocess.run", return_value=completed):
+            result = gphoto2_read_choices(["batterylevel"])
+        assert result == {}
+
+
+class TestGphoto2ApplyInitSettings:
+    def test_calls_set_config_for_each_init_field(self):
+        completed = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("timelapse_agent.subprocess.run", return_value=completed) as mock_run:
+            gphoto2_apply_init_settings({
+                "capture_target": "Memory card",
+                "drive_mode": "Single",
+                "focus_mode": "Manual",
+            })
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        assert ["gphoto2", "--set-config", "capturetarget=Memory card"] in calls
+        assert ["gphoto2", "--set-config", "drivemode=Single"] in calls
+        assert ["gphoto2", "--set-config", "focusmode=Manual"] in calls
+
+    def test_swallows_called_process_error(self):
+        with patch("timelapse_agent.subprocess.run", side_effect=subprocess.CalledProcessError(1, "gphoto2")):
+            gphoto2_apply_init_settings({"capture_target": "Memory card", "drive_mode": "Single", "focus_mode": "Manual"})
+
+
+class TestGphoto2ApplySequenceSettings:
+    def test_calls_set_config_for_non_none_fields(self):
+        completed = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("timelapse_agent.subprocess.run", return_value=completed) as mock_run:
+            gphoto2_apply_sequence_settings({"iso": "400", "shutterspeed": "1/125", "aperture": None})
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        assert ["gphoto2", "--set-config", "iso=400"] in calls
+        assert ["gphoto2", "--set-config", "shutterspeed=1/125"] in calls
+        assert not any("aperture" in str(c) for c in calls)
+
+    def test_skips_all_none_fields(self):
+        with patch("timelapse_agent.subprocess.run") as mock_run:
+            gphoto2_apply_sequence_settings({})
+        mock_run.assert_not_called()
+
+    def test_continues_after_per_key_failure(self):
+        def raise_on_iso(cmd, **_kwargs):
+            if "iso=" in cmd[2]:
+                raise subprocess.CalledProcessError(1, "gphoto2")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("timelapse_agent.subprocess.run", side_effect=raise_on_iso) as mock_run:
+            gphoto2_apply_sequence_settings({"iso": "400", "shutterspeed": "1/125"})
+        assert mock_run.call_count == 2
+
+
+class TestGphoto2ReadTelemetry:
+    def test_parses_battery_and_shots(self):
+        def fake_run(cmd, **_kwargs):
+            key = cmd[2]
+            outputs = {
+                "batterylevel": "Label: Battery Level\nReadonly: 1\nType: TEXT\nCurrent: 87%\n",
+                "availableshots": "Label: Available Shots\nReadonly: 1\nType: TEXT\nCurrent: 1204\n",
+                "shuttercounter": "Label: Shutter Counter\nReadonly: 1\nType: TEXT\nCurrent: 12483\n",
+                "autoexposuremode": "Label: Exposure Mode\nReadonly: 1\nType: TEXT\nCurrent: M\n",
+            }
+            return MagicMock(returncode=0, stdout=outputs.get(key, ""), stderr="")
+
+        with patch("timelapse_agent.subprocess.run", side_effect=fake_run):
+            result = gphoto2_read_telemetry()
+
+        assert result["battery_level"] == "87%"
+        assert result["available_shots"] == 1204
+        assert result["shutter_counter"] == 12483
+        assert result["exposure_mode"] == "M"
+
+    def test_returns_none_fields_on_subprocess_failure(self):
+        with patch("timelapse_agent.subprocess.run", side_effect=subprocess.CalledProcessError(1, "gphoto2")):
+            result = gphoto2_read_telemetry()
+        assert result["battery_level"] is None
+        assert result["available_shots"] is None
+        assert result["shutter_counter"] is None
+        assert result["exposure_mode"] is None
