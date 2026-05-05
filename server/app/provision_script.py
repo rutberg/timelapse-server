@@ -76,7 +76,24 @@ def build_install_script(
         VERSION_DIR="$INSTALL_ROOT/$AGENT_VERSION"
 
         {bootstrap}sudo apt-get update
-        sudo apt-get install -y rpicam-apps-lite python3
+        sudo apt-get install -y rpicam-apps-lite python3 gphoto2
+
+        # USB DSLR support: allow non-root agent process to claim any PTP/MTP
+        # camera. Matching on bDeviceClass 6 (Still Image) covers all vendors.
+        sudo tee /etc/udev/rules.d/90-timelapse-dslr.rules >/dev/null <<'TIMELAPSE_UDEV_EOF'
+        SUBSYSTEMS=="usb", ATTRS{{bDeviceClass}}=="06", GROUP="plugdev", MODE="0664"
+        TIMELAPSE_UDEV_EOF
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger
+
+        # Mask the gvfs auto-mounter; if it grabs the camera first, gphoto2
+        # gets "Could not claim the USB device" errors. Masking is idempotent
+        # and harmless on systems where the unit doesn't exist.
+        sudo systemctl mask gvfs-gphoto2-volume-monitor.service 2>/dev/null || true
+
+        # Add the SSH user (which the systemd unit runs as) to plugdev so the
+        # udev rule's group permissions take effect.
+        sudo usermod -aG plugdev {ssh_user}
 
         sudo install -d -m 755 "$VERSION_DIR" /etc/timelapse-agent /var/lib/timelapse-agent
 
@@ -95,5 +112,10 @@ def build_install_script(
         sudo systemctl daemon-reload
         sudo systemctl enable --now timelapse-agent
         """
-    ).format(agent_version=agent_version, config_json=config_json, bootstrap=bootstrap)
+    ).format(
+        agent_version=agent_version,
+        config_json=config_json,
+        bootstrap=bootstrap,
+        ssh_user=ssh_user,
+    )
     return body

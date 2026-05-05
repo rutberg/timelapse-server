@@ -8,6 +8,7 @@ import logging
 import math
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -62,6 +63,11 @@ class AgentState:
     in_schedule: bool = True
     local_hour: int = 0
     current_light: Optional[int] = None
+    active_backend: Optional[str] = None
+    dslr_choices: Optional[Dict[str, Any]] = None
+    dslr_telemetry: Optional[Dict[str, Any]] = None
+    last_reinit_token: Optional[str] = None
+    last_init_at: Optional[str] = None
 
 
 def next_allowed_hour(current_hour: int, capture_hours: list) -> int:
@@ -444,6 +450,18 @@ def read_wifi_rssi() -> Optional[int]:
 
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/checkin"
+    dslr_payload: Optional[Dict[str, Any]] = None
+    if state.active_backend == "gphoto2":
+        tel = state.dslr_telemetry or {}
+        dslr_payload = {
+            "battery_level": tel.get("battery_level"),
+            "available_shots": tel.get("available_shots"),
+            "shutter_counter": tel.get("shutter_counter"),
+            "exposure_mode": tel.get("exposure_mode"),
+            "choices": state.dslr_choices or {},
+            "last_reinit_token": state.last_reinit_token,
+            "last_init_at": state.last_init_at,
+        }
     payload = {
         "agent_version": AGENT_VERSION,
         "hostname": socket.gethostname(),
@@ -456,6 +474,8 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "local_hour": state.local_hour,
         "current_light": state.current_light,
         "signal_dbm": read_wifi_rssi(),
+        "active_backend": state.active_backend,
+        "dslr": dslr_payload,
     }
     try:
         post_json(url, payload)
@@ -500,6 +520,358 @@ def find_capture_command() -> Optional[str]:
         if path:
             return path
     return None
+
+
+def gphoto2_available() -> bool:
+    """Return True if the gphoto2 binary is installed AND a camera is currently
+    attached and visible to libgphoto2 over USB.
+
+    `gphoto2 --auto-detect` always exits 0; an empty list is signalled by the
+    output containing only the two-line header. We detect a camera by counting
+    non-header lines.
+    """
+    if not shutil.which("gphoto2"):
+        return False
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--auto-detect"],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    if result.returncode != 0:
+        return False
+    # Output format:
+    #   Model                          Port
+    #   ----------------------------------------------------------
+    #   Canon EOS R6                   usb:001,005
+    for line in result.stdout.splitlines()[2:]:
+        if line.strip():
+            return True
+    return False
+
+
+def resolve_active_backend(config: Dict[str, Any]) -> Optional[str]:
+    """Pick which capture backend to use given the server config.
+
+    Returns 'rpicam', 'gphoto2', or None if neither is available.
+    """
+    requested = config.get("camera_backend", "auto")
+    if requested == "rpicam":
+        return "rpicam" if find_capture_command() else None
+    if requested == "gphoto2":
+        return "gphoto2" if gphoto2_available() else None
+    # auto: prefer gphoto2 (more specialised) when a USB camera is present
+    if gphoto2_available():
+        return "gphoto2"
+    if find_capture_command():
+        return "rpicam"
+    return None
+
+
+@dataclass(frozen=True)
+class CameraFileRef:
+    folder: str
+    filename: str
+
+
+# gphoto2 prints a line like:
+#   New file is in location /store_00020001/DCIM/100CANON/IMG_0042.CR3 on the camera
+_NEW_FILE_RE = re.compile(
+    r"^New file is in location (?P<path>/\S+?) on the camera\s*$"
+)
+
+
+def parse_new_file_location(stdout: str) -> Optional[CameraFileRef]:
+    """Parse gphoto2 --capture-image stdout and return the camera file reference.
+
+    Returns None if no `New file is in location` line is found.
+    """
+    for line in stdout.splitlines():
+        match = _NEW_FILE_RE.match(line)
+        if match:
+            full = match.group("path")
+            folder, _, filename = full.rpartition("/")
+            return CameraFileRef(folder=folder or "/", filename=filename)
+    return None
+
+
+def gphoto2_capture_trigger(timeout: int = 30) -> CameraFileRef:
+    """Trigger a capture on the connected DSLR; image stays on the camera SD.
+
+    Returns the (folder, filename) reference parsed from gphoto2 stdout. Raises
+    RuntimeError if the output can't be parsed, or subprocess.CalledProcessError
+    on a non-zero exit (e.g. camera disconnected, SD full).
+    """
+    result = subprocess.run(
+        ["gphoto2", "--capture-image"],
+        check=True, capture_output=True, text=True, timeout=timeout,
+    )
+    ref = parse_new_file_location(result.stdout)
+    if ref is None:
+        raise RuntimeError(
+            f"Could not parse gphoto2 capture output: {result.stdout!r}"
+        )
+    return ref
+
+
+PENDING_CAMERA_FILES_NAME = "pending_camera_files.json"
+
+
+def load_camera_pending(work_dir: Path) -> List[Dict[str, str]]:
+    """Read the pending-camera-files queue. Returns [] if file missing or invalid."""
+    path = work_dir / PENDING_CAMERA_FILES_NAME
+    if not path.exists():
+        return []
+    try:
+        data = load_json(path)
+    except (json.JSONDecodeError, OSError):
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return entries if isinstance(entries, list) else []
+
+
+def save_camera_pending(work_dir: Path, entries: List[Dict[str, str]]) -> None:
+    """Atomically write the pending-camera-files queue."""
+    write_json(work_dir / PENDING_CAMERA_FILES_NAME, {"entries": entries})
+
+
+def add_camera_pending(work_dir: Path, ref: CameraFileRef, captured_at: str) -> None:
+    """Append a new pending entry for an image still on the camera."""
+    entries = load_camera_pending(work_dir)
+    entries.append({
+        "folder": ref.folder,
+        "filename": ref.filename,
+        "captured_at": captured_at,
+    })
+    save_camera_pending(work_dir, entries)
+
+
+def remove_camera_pending(work_dir: Path, ref: CameraFileRef) -> None:
+    """Drop the entry matching (folder, filename). No-op if missing."""
+    entries = load_camera_pending(work_dir)
+    filtered = [
+        e for e in entries
+        if not (e.get("folder") == ref.folder and e.get("filename") == ref.filename)
+    ]
+    if len(filtered) != len(entries):
+        save_camera_pending(work_dir, filtered)
+
+
+GPHOTO2_STAGE_DIR = Path("/tmp/timelapse-agent-stage")
+
+
+def gphoto2_download_file(ref: CameraFileRef, dest_path: Path, timeout: int = 120) -> Path:
+    """Download a single file from the camera to dest_path.
+
+    The destination should live on tmpfs (/tmp on Pi OS) so the SD card never
+    sees the bytes. Caller is responsible for unlinking dest_path after upload.
+    """
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "gphoto2",
+            "--folder", ref.folder,
+            "--get-file", ref.filename,
+            "--filename", str(dest_path),
+            "--force-overwrite",
+        ],
+        check=True, capture_output=True, text=True, timeout=timeout,
+    )
+    return dest_path
+
+
+def gphoto2_delete_file(ref: CameraFileRef, timeout: int = 30) -> None:
+    """Delete a single file from the camera SD card.
+
+    "File not found" is treated as success — the entry was already gone, which
+    is exactly the state we wanted to reach. Other failures (USB claim errors,
+    write-protected card, etc.) are propagated.
+    """
+    try:
+        subprocess.run(
+            [
+                "gphoto2",
+                "--folder", ref.folder,
+                "--delete-file", ref.filename,
+            ],
+            check=True, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.CalledProcessError as error:
+        stderr = (error.stderr or "").lower()
+        if "file not found" in stderr:
+            return
+        raise
+
+
+def gphoto2_disable_autopoweroff(timeout: int = 10) -> None:
+    """Disable the camera's auto-poweroff so the USB connection stays alive.
+
+    Best-effort: not all camera bodies expose this property. Failures are
+    logged and swallowed.
+    """
+    try:
+        subprocess.run(
+            ["gphoto2", "--set-config", "autopoweroff=0"],
+            check=True, capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+        logging.info("Could not disable camera autopoweroff (often harmless): %s", error)
+
+
+_DSLR_INIT_KEY_MAP: Dict[str, str] = {
+    "capture_target": "capturetarget",
+    "drive_mode": "drivemode",
+    "focus_mode": "focusmode",
+}
+
+_DSLR_SEQUENCE_KEY_MAP: Dict[str, str] = {
+    "shutterspeed": "shutterspeed",
+    "aperture": "aperture",
+    "iso": "iso",
+    "exposure_compensation": "exposurecompensation",
+    "whitebalance": "whitebalance",
+    "image_format": "imageformat",
+}
+
+_DSLR_CHOICE_KEYS: List[str] = [
+    "shutterspeed", "aperture", "iso", "exposurecompensation",
+    "whitebalance", "imageformat", "capturetarget", "drivemode", "focusmode",
+]
+
+
+def gphoto2_read_choices(keys: Optional[List[str]] = None) -> Dict[str, List[str]]:
+    if keys is None:
+        keys = _DSLR_CHOICE_KEYS
+    choices: Dict[str, List[str]] = {}
+    for key in keys:
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--get-config", key],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        values = []
+        for line in result.stdout.splitlines():
+            if line.startswith("Choice:"):
+                parts = line.split(None, 2)
+                if len(parts) >= 3:
+                    values.append(parts[2])
+        if values:
+            choices[key] = values
+    return choices
+
+
+def gphoto2_apply_init_settings(dslr: Dict[str, Any]) -> None:
+    for field_name, gphoto_key in _DSLR_INIT_KEY_MAP.items():
+        value = dslr.get(field_name)
+        if value is None:
+            continue
+        try:
+            subprocess.run(
+                ["gphoto2", "--set-config", f"{gphoto_key}={value}"],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as err:
+            logging.warning("Could not set DSLR init setting %s=%s: %s", gphoto_key, value, err)
+
+
+def gphoto2_apply_sequence_settings(dslr: Dict[str, Any]) -> None:
+    for field_name, gphoto_key in _DSLR_SEQUENCE_KEY_MAP.items():
+        value = dslr.get(field_name)
+        if value is None:
+            continue
+        try:
+            subprocess.run(
+                ["gphoto2", "--set-config", f"{gphoto_key}={value}"],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as err:
+            logging.warning("Could not set DSLR sequence setting %s=%s: %s", gphoto_key, value, err)
+
+
+def _gphoto2_get_current(key: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--get-config", key],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Current:"):
+                return line.split(":", 1)[1].strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def gphoto2_read_telemetry() -> Dict[str, Any]:
+    shots_str = _gphoto2_get_current("availableshots")
+    counter_str = _gphoto2_get_current("shuttercounter")
+    return {
+        "battery_level": _gphoto2_get_current("batterylevel"),
+        "available_shots": int(shots_str) if shots_str and shots_str.isdigit() else None,
+        "shutter_counter": int(counter_str) if counter_str and counter_str.isdigit() else None,
+        "exposure_mode": _gphoto2_get_current("autoexposuremode"),
+    }
+
+
+def measure_camera_pending(work_dir: Path) -> int:
+    """Number of images queued on the camera awaiting upload."""
+    return len(load_camera_pending(work_dir))
+
+
+def upload_camera_pending(
+    settings: Dict[str, Any], work_dir: Path, state: AgentState
+) -> None:
+    """For gphoto2 backend: stream each pending camera file → server → delete from camera."""
+    entries = load_camera_pending(work_dir)
+    if not entries:
+        return
+
+    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/upload"
+    GPHOTO2_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    for entry in list(entries):
+        ref = CameraFileRef(folder=entry["folder"], filename=entry["filename"])
+        captured_at = entry.get("captured_at") or now_local_iso()
+        stage_path = GPHOTO2_STAGE_DIR / ref.filename
+
+        try:
+            gphoto2_download_file(ref, stage_path)
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").lower()
+            if "could not find" in stderr or "file not found" in stderr:
+                logging.warning(
+                    "Camera file missing, dropping queue entry: %s/%s",
+                    ref.folder, ref.filename,
+                )
+                remove_camera_pending(work_dir, ref)
+                continue
+            logging.warning("Download failed for %s: %s", ref.filename, error)
+            state.last_error = f"download failed: {error}"
+            return
+
+        try:
+            post_multipart(url, stage_path, captured_at)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+            logging.warning("Upload failed for %s: %s", ref.filename, error)
+            state.last_error = f"upload failed: {error}"
+            stage_path.unlink(missing_ok=True)
+            return
+
+        stage_path.unlink(missing_ok=True)
+        try:
+            gphoto2_delete_file(ref)
+        except subprocess.CalledProcessError as error:
+            # Upload succeeded but camera delete failed; keep going so we don't
+            # re-upload, but flag it.
+            logging.warning("Camera delete failed for %s: %s", ref.filename, error)
+            state.last_error = f"camera delete failed: {error}"
+        remove_camera_pending(work_dir, ref)
+        state.last_upload_at = now_local_iso()
+        state.last_error = None
+        logging.info("Uploaded (camera) %s", ref.filename)
 
 
 def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
@@ -583,19 +955,56 @@ def should_capture_for_scene(current_light: Optional[int], threshold: Optional[i
     return current_light >= threshold
 
 
+def should_sample_light(backend: Optional[str]) -> bool:
+    """Light sampling is only available on the rpicam backend (fast YUV thumbnail).
+    DSLRs over gphoto2 have no equivalent fast preview, so we skip sampling
+    and the user can't use scene-light gating with a DSLR."""
+    return backend == "rpicam"
+
+
 def now_local_iso() -> str:
     """ISO-8601 timestamp with explicit UTC offset, in agent local time."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
-    command = find_capture_command()
-    if not command:
-        raise RuntimeError("No camera command found: expected rpicam-still, libcamera-still, or raspistill")
+    """Trigger a capture using the configured backend.
 
-    # Filename uses local wall-clock time so files sort by what the camera
-    # saw, not by UTC. The sidecar carries the full ISO including offset
-    # so the timezone is never lost.
+    Always returns a pathlib.Path to a JPEG written under work_dir/pending/.
+    """
+    backend = resolve_active_backend(config)
+    if backend is None:
+        raise RuntimeError(
+            "No camera backend available: install rpicam-apps-lite for Pi cameras "
+            "or gphoto2 + a USB DSLR"
+        )
+
+    captured_at_filename = datetime.now().strftime("%Y%m%dT%H%M%S")
+    output_path = work_dir / "pending" / f"{captured_at_filename}.jpg"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(".tmp.jpg")
+
+    if backend == "gphoto2":
+        # Use --capture-image-and-download so the file lands on local disk
+        # immediately. Some cameras (e.g. Sony RX100) keep the captured file
+        # only in RAM; a separate --get-file call issued even seconds later
+        # finds nothing. Downloading inline avoids that race.
+        subprocess.run(
+            [
+                "gphoto2",
+                "--capture-image-and-download",
+                "--filename", str(temp_path),
+                "--force-overwrite",
+            ],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        temp_path.replace(output_path)
+        metadata = {"captured_at": now_local_iso(), "hostname": socket.gethostname()}
+        write_json(output_path.with_suffix(".json"), metadata)
+        return output_path
+
+    # rpicam path (unchanged behaviour)
+    command = find_capture_command()
     captured_at_filename = datetime.now().strftime("%Y%m%dT%H%M%S")
     output_path = work_dir / "pending" / f"{captured_at_filename}.jpg"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -626,6 +1035,8 @@ def fetch_remote_config(settings: Dict[str, Any], cache_path: Path) -> Dict[str,
 
 
 def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) -> None:
+    """Drain both the local pending/ directory (rpicam path) and the camera-
+    resident pending queue (gphoto2 path). Either may be empty."""
     pending_dir = work_dir / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/upload"
@@ -647,6 +1058,8 @@ def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) 
         state.last_upload_at = now_local_iso()
         state.last_error = None
         logging.info("Uploaded %s", image_path.name)
+
+    upload_camera_pending(settings, work_dir, state)
 
 
 def next_due_time(last_capture: Optional[float], interval_seconds: int, now: float) -> float:
@@ -672,7 +1085,18 @@ def run_agent(settings: Dict[str, Any]) -> None:
         "Agent v%s started for camera_id=%s (max_pending_bytes=%s)",
         AGENT_VERSION, settings["camera_id"], max_pending_bytes,
     )
+    active_backend = resolve_active_backend(remote_config)
+    state.active_backend = active_backend
+    if active_backend == "gphoto2":
+        gphoto2_disable_autopoweroff()
+        dslr_config = remote_config.get("dslr") or {}
+        state.dslr_choices = gphoto2_read_choices()
+        if dslr_config:
+            gphoto2_apply_init_settings(dslr_config)
+            state.last_reinit_token = dslr_config.get("reinit_token")
+            state.last_init_at = now_local_iso()
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
+    state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
     state.local_hour = startup_now.hour
     startup_schedule_mode = remote_config.get("schedule_mode")
@@ -700,6 +1124,17 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
             state.pending_count, state.pending_bytes = measure_pending(work_dir)
+            state.pending_count += measure_camera_pending(work_dir)
+            if state.active_backend == "gphoto2":
+                dslr_config = remote_config.get("dslr") or {}
+                new_token = dslr_config.get("reinit_token")
+                if new_token != state.last_reinit_token:
+                    gphoto2_apply_init_settings(dslr_config)
+                    state.dslr_choices = gphoto2_read_choices()
+                    state.last_reinit_token = new_token
+                    state.last_init_at = now_local_iso()
+                    logging.info("DSLR re-initialized (token=%s)", new_token)
+                state.dslr_telemetry = gphoto2_read_telemetry()
             post_checkin(settings, state)
             if check_for_update(settings):
                 logging.info("Exiting to allow systemd restart")
@@ -708,6 +1143,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
 
         upload_pending(settings, work_dir, state)
         state.pending_count, state.pending_bytes = measure_pending(work_dir)
+        state.pending_count += measure_camera_pending(work_dir)
 
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))
@@ -746,12 +1182,23 @@ def run_agent(settings: Dict[str, Any]) -> None:
         # a live reading regardless of schedule_mode. Sampling adds ~200ms;
         # negligible compared to the capture interval.
         if enabled and in_schedule and now >= next_capture:
-            tool = find_capture_command()
-            if tool:
-                state.current_light = sample_light_level(tool)
+            active_backend = resolve_active_backend(remote_config)
+            if should_sample_light(active_backend):
+                tool = find_capture_command()
+                if tool:
+                    state.current_light = sample_light_level(tool)
+            else:
+                state.current_light = None
             # Scene-light mode: skip the actual capture if below threshold.
-            if schedule_mode == "scene" and not should_capture_for_scene(
-                state.current_light, remote_config.get("light_threshold")
+            # On gphoto2 backend current_light is always None and the
+            # conservative defaults in should_capture_for_scene mean we never
+            # gate captures out — equivalent to scene mode being a no-op.
+            if (
+                schedule_mode == "scene"
+                and active_backend == "rpicam"
+                and not should_capture_for_scene(
+                    state.current_light, remote_config.get("light_threshold")
+                )
             ):
                 logging.info(
                     "Scene-light gate: Y=%s < threshold=%s, skipping",
@@ -759,6 +1206,8 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 )
                 next_capture = now + interval_seconds
         if enabled and in_schedule and now >= next_capture:
+            if state.active_backend == "gphoto2":
+                gphoto2_apply_sequence_settings(remote_config.get("dslr") or {})
             try:
                 image_path = capture_frame(work_dir, remote_config)
                 state.last_capture_at = now_local_iso()
@@ -778,6 +1227,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                     )
                 upload_pending(settings, work_dir, state)
                 state.pending_count, state.pending_bytes = measure_pending(work_dir)
+                state.pending_count += measure_camera_pending(work_dir)
                 next_capture = last_capture + interval_seconds
 
         sleep_until = min(next_capture, next_config_poll)

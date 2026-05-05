@@ -20,3 +20,5 @@ dev-data/
 .dev-server.log
 .playwright-mcp/
 CLAUDE.md
+AGENTS.md
+AGENTS.md.bak

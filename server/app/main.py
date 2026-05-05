@@ -48,6 +48,29 @@ ALLOWED_NETWORKS = [
 ]
 
 
+class DslrSettings(BaseModel):
+    capture_target: str = "Memory card"
+    drive_mode: str = "Single"
+    focus_mode: str = "Manual"
+    shutterspeed: Optional[str] = None
+    aperture: Optional[str] = None
+    iso: Optional[str] = None
+    exposure_compensation: Optional[str] = None
+    whitebalance: Optional[str] = None
+    image_format: Optional[str] = None
+    reinit_token: Optional[str] = None
+
+
+class DslrStatus(BaseModel):
+    battery_level: Optional[str] = None
+    available_shots: Optional[int] = None
+    shutter_counter: Optional[int] = None
+    exposure_mode: Optional[str] = None
+    choices: Dict[str, List[str]] = Field(default_factory=dict)
+    last_reinit_token: Optional[str] = None
+    last_init_at: Optional[str] = None
+
+
 class CameraConfig(BaseModel):
     enabled: bool = True
     interval_seconds: int = Field(900, ge=30, le=86_400)
@@ -83,6 +106,25 @@ class CameraConfig(BaseModel):
     )
     latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
     longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    camera_backend: str = Field(
+        default="auto",
+        description=(
+            "Capture backend selection: 'auto' (gphoto2 if a USB camera is "
+            "detected, otherwise rpicam), 'rpicam' (Pi camera via rpicam-still/"
+            "libcamera-still/raspistill), or 'gphoto2' (USB DSLR via gphoto2)."
+        ),
+    )
+    dslr: Optional[DslrSettings] = None
+
+    @field_validator("camera_backend")
+    @classmethod
+    def _validate_camera_backend(cls, value):
+        allowed = {"auto", "rpicam", "gphoto2"}
+        if value not in allowed:
+            raise ValueError(
+                f"camera_backend must be one of {sorted(allowed)}, got {value!r}"
+            )
+        return value
 
     @field_validator("capture_hours")
     @classmethod
@@ -167,6 +209,8 @@ class CameraStatus(BaseModel):
     local_hour: Optional[int] = None
     current_light: Optional[int] = Field(default=None, ge=0, le=255)
     signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
+    active_backend: Optional[str] = None
+    dslr: Optional[DslrStatus] = None
 
 
 class CameraRecord(BaseModel):
@@ -186,6 +230,8 @@ class CheckinRequest(BaseModel):
     local_hour: Optional[int] = Field(default=None, ge=0, le=23)
     current_light: Optional[int] = Field(default=None, ge=0, le=255)
     signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
+    active_backend: Optional[str] = None
+    dslr: Optional[DslrStatus] = None
 
 
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
@@ -544,6 +590,12 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/server-info")
+def server_info(request: Request) -> Dict[str, Any]:
+    url = resolve_public_server_url(str(request.base_url).rstrip("/"))
+    return {"server_url": url, "lan_ip": detect_lan_ip()}
+
+
 def agent_store() -> AgentStore:
     return AgentStore(DATA_DIR)
 
@@ -720,6 +772,10 @@ def post_checkin(
         status["current_light"] = payload.current_light
     if payload.signal_dbm is not None:
         status["signal_dbm"] = payload.signal_dbm
+    if payload.active_backend is not None:
+        status["active_backend"] = payload.active_backend
+    if payload.dslr is not None:
+        status["dslr"] = payload.dslr.model_dump()
     status["last_error"] = payload.last_error
 
     cameras[camera_id] = record

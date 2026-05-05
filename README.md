@@ -197,3 +197,43 @@ If the install fails, the agent logs `Update failed: ...` and stays on the old v
 ## Security Note
 
 By default, the server is configured to only allow connections from the local network. Ensure `TIMELAPSE_ALLOWED_NETWORKS` in your server environment file correctly reflects your LAN setup.
+
+---
+
+## Development
+
+### Environment setup
+
+Run `scripts/codex-setup.sh` in cloud/CI environments. It creates `.venv-dev`, installs `requirements-dev.txt`, and tries to install the system packages needed by video rendering and provisioning code. If `apt-get` is blocked the script continues so Python tests can still run.
+
+Useful environment defaults for local development:
+
+```bash
+TIMELAPSE_DATA_DIR=/tmp/timelapse-data
+TIMELAPSE_ALLOWED_NETWORKS=127.0.0.0/8,::1/128
+TIMELAPSE_BIND_HOST=127.0.0.1
+TIMELAPSE_PORT=8080
+TIMELAPSE_VENV=.venv-dev
+```
+
+### Running tests
+
+Run the full test suite before opening a PR:
+
+```bash
+.venv-dev/bin/python -m pytest
+```
+
+Narrower commands for faster iteration:
+
+```bash
+.venv-dev/bin/python -m pytest tests/server   # server only
+.venv-dev/bin/python -m pytest tests/agent    # agent only
+```
+
+### Development server
+
+```bash
+scripts/dev-server.sh start   # http://127.0.0.1:8080
+scripts/dev-server.sh stop
+```
