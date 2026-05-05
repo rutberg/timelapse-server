@@ -771,14 +771,28 @@ def now_local_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
-    command = find_capture_command()
-    if not command:
-        raise RuntimeError("No camera command found: expected rpicam-still, libcamera-still, or raspistill")
+def capture_frame(work_dir: Path, config: Dict[str, Any]):
+    """Trigger a capture using the configured backend.
 
-    # Filename uses local wall-clock time so files sort by what the camera
-    # saw, not by UTC. The sidecar carries the full ISO including offset
-    # so the timezone is never lost.
+    Returns:
+        - For 'rpicam' backend: pathlib.Path to the JPEG written under work_dir/pending/.
+        - For 'gphoto2' backend: a CameraFileRef pointing to the newly captured
+          file still residing on the camera SD card.
+    """
+    backend = resolve_active_backend(config)
+    if backend is None:
+        raise RuntimeError(
+            "No camera backend available: install rpicam-apps-lite for Pi cameras "
+            "or gphoto2 + a USB DSLR"
+        )
+
+    if backend == "gphoto2":
+        ref = gphoto2_capture_trigger()
+        add_camera_pending(work_dir, ref, captured_at=now_local_iso())
+        return ref
+
+    # rpicam path (unchanged behaviour)
+    command = find_capture_command()
     captured_at_filename = datetime.now().strftime("%Y%m%dT%H%M%S")
     output_path = work_dir / "pending" / f"{captured_at_filename}.jpg"
     output_path.parent.mkdir(parents=True, exist_ok=True)

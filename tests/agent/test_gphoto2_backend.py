@@ -286,3 +286,49 @@ class TestGphoto2DeleteFile:
         with patch("timelapse_agent.subprocess.run", side_effect=err):
             with pytest.raises(subprocess.CalledProcessError):
                 gphoto2_delete_file(CameraFileRef(folder="/a", filename="X.CR3"))
+
+
+from timelapse_agent import capture_frame
+
+
+class TestCaptureFrameGphoto2Branch:
+    def test_gphoto2_capture_appends_to_queue_and_returns_ref(self, tmp_path):
+        config = {"camera_backend": "gphoto2"}
+        completed = MagicMock(
+            returncode=0,
+            stdout="New file is in location /a/b/IMG_99.CR3 on the camera\n",
+            stderr="",
+        )
+        with patch("timelapse_agent.resolve_active_backend", return_value="gphoto2"), \
+             patch("timelapse_agent.subprocess.run", return_value=completed):
+            result = capture_frame(tmp_path, config)
+        assert isinstance(result, CameraFileRef)
+        assert result.filename == "IMG_99.CR3"
+        entries = load_camera_pending(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["filename"] == "IMG_99.CR3"
+        assert entries[0]["folder"] == "/a/b"
+        assert "captured_at" in entries[0]
+
+    def test_rpicam_capture_path_unchanged(self, tmp_path):
+        # When backend is rpicam, capture_frame should still write to pending/.
+        config = {"camera_backend": "rpicam", "jpeg_quality": 85}
+
+        def fake_run(cmd, **kwargs):
+            # Simulate rpicam writing the temp jpg.
+            output_arg = cmd[cmd.index("--output") + 1] if "--output" in cmd else cmd[cmd.index("-o") + 1]
+            Path(output_arg).write_bytes(b"jpeg-bytes")
+            return MagicMock(returncode=0)
+
+        with patch("timelapse_agent.resolve_active_backend", return_value="rpicam"), \
+             patch("timelapse_agent.find_capture_command", return_value="/usr/bin/rpicam-still"), \
+             patch("timelapse_agent.subprocess.run", side_effect=fake_run):
+            result = capture_frame(tmp_path, config)
+        assert isinstance(result, Path)
+        assert result.suffix == ".jpg"
+        assert result.parent == tmp_path / "pending"
+
+    def test_no_backend_raises(self, tmp_path):
+        with patch("timelapse_agent.resolve_active_backend", return_value=None):
+            with pytest.raises(RuntimeError, match="No camera backend"):
+                capture_frame(tmp_path, {"camera_backend": "auto"})
