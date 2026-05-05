@@ -65,6 +65,7 @@ class AgentState:
     current_light: Optional[int] = None
     active_backend: Optional[str] = None
     dslr_choices: Optional[Dict[str, Any]] = None
+    dslr_current_values: Optional[Dict[str, str]] = None
     dslr_telemetry: Optional[Dict[str, Any]] = None
     last_reinit_token: Optional[str] = None
     last_init_at: Optional[str] = None
@@ -458,7 +459,10 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
             "available_shots": tel.get("available_shots"),
             "shutter_counter": tel.get("shutter_counter"),
             "exposure_mode": tel.get("exposure_mode"),
+            "lens_name": tel.get("lens_name"),
+            "camera_model": tel.get("camera_model"),
             "choices": state.dslr_choices or {},
+            "current_values": state.dslr_current_values or {},
             "last_reinit_token": state.last_reinit_token,
             "last_init_at": state.last_init_at,
         }
@@ -740,10 +744,14 @@ _DSLR_CHOICE_KEYS: List[str] = [
 ]
 
 
-def gphoto2_read_choices(keys: Optional[List[str]] = None) -> Dict[str, List[str]]:
+def gphoto2_read_choices_and_current(
+    keys: Optional[List[str]] = None,
+) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+    """Read available choices and the current value for each setting in one pass."""
     if keys is None:
         keys = _DSLR_CHOICE_KEYS
     choices: Dict[str, List[str]] = {}
+    current_values: Dict[str, str] = {}
     for key in keys:
         try:
             result = subprocess.run(
@@ -752,15 +760,32 @@ def gphoto2_read_choices(keys: Optional[List[str]] = None) -> Dict[str, List[str
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             continue
-        values = []
+        values: List[str] = []
+        current: Optional[str] = None
         for line in result.stdout.splitlines():
             if line.startswith("Choice:"):
                 parts = line.split(None, 2)
                 if len(parts) >= 3:
                     values.append(parts[2])
+            elif line.startswith("Current:"):
+                current = line.split(":", 1)[1].strip()
         if values:
             choices[key] = values
-    return choices
+        if current is not None:
+            current_values[key] = current
+    return choices, current_values
+
+
+def gphoto2_read_current_values(keys: Optional[List[str]] = None) -> Dict[str, str]:
+    """Lightweight read of just the current value for each setting (no choices)."""
+    if keys is None:
+        keys = _DSLR_CHOICE_KEYS
+    current: Dict[str, str] = {}
+    for key in keys:
+        val = _gphoto2_get_current(key)
+        if val is not None:
+            current[key] = val
+    return current
 
 
 def gphoto2_apply_init_settings(dslr: Dict[str, Any]) -> None:
@@ -805,6 +830,21 @@ def _gphoto2_get_current(key: str) -> Optional[str]:
     return None
 
 
+def _gphoto2_first_current(*keys: str) -> Optional[str]:
+    """Return the Current: value for the first key that gphoto2 can read.
+
+    Cameras differ on which PTP properties they expose: Canon publishes
+    `batterylevel`, `lensname`, `autoexposuremode`; Sony publishes
+    `expprogram` and `cameramodel` instead, with no battery/shots/counter
+    equivalent. Callers chain the candidates in preferred order.
+    """
+    for key in keys:
+        val = _gphoto2_get_current(key)
+        if val is not None:
+            return val
+    return None
+
+
 def gphoto2_read_telemetry() -> Dict[str, Any]:
     shots_str = _gphoto2_get_current("availableshots")
     counter_str = _gphoto2_get_current("shuttercounter")
@@ -812,7 +852,9 @@ def gphoto2_read_telemetry() -> Dict[str, Any]:
         "battery_level": _gphoto2_get_current("batterylevel"),
         "available_shots": int(shots_str) if shots_str and shots_str.isdigit() else None,
         "shutter_counter": int(counter_str) if counter_str and counter_str.isdigit() else None,
-        "exposure_mode": _gphoto2_get_current("autoexposuremode"),
+        "exposure_mode": _gphoto2_first_current("autoexposuremode", "expprogram"),
+        "lens_name": _gphoto2_get_current("lensname"),
+        "camera_model": _gphoto2_first_current("cameramodel", "model"),
     }
 
 
@@ -1090,11 +1132,12 @@ def run_agent(settings: Dict[str, Any]) -> None:
     if active_backend == "gphoto2":
         gphoto2_disable_autopoweroff()
         dslr_config = remote_config.get("dslr") or {}
-        state.dslr_choices = gphoto2_read_choices()
+        state.dslr_choices, state.dslr_current_values = gphoto2_read_choices_and_current()
         if dslr_config:
             gphoto2_apply_init_settings(dslr_config)
             state.last_reinit_token = dslr_config.get("reinit_token")
             state.last_init_at = now_local_iso()
+            state.dslr_current_values = gphoto2_read_current_values()
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
     state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
@@ -1130,10 +1173,12 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 new_token = dslr_config.get("reinit_token")
                 if new_token != state.last_reinit_token:
                     gphoto2_apply_init_settings(dslr_config)
-                    state.dslr_choices = gphoto2_read_choices()
+                    state.dslr_choices, state.dslr_current_values = gphoto2_read_choices_and_current()
                     state.last_reinit_token = new_token
                     state.last_init_at = now_local_iso()
                     logging.info("DSLR re-initialized (token=%s)", new_token)
+                else:
+                    state.dslr_current_values = gphoto2_read_current_values()
                 state.dslr_telemetry = gphoto2_read_telemetry()
             post_checkin(settings, state)
             if check_for_update(settings):

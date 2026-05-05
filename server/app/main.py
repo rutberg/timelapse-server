@@ -69,7 +69,10 @@ class DslrStatus(BaseModel):
     available_shots: Optional[int] = None
     shutter_counter: Optional[int] = None
     exposure_mode: Optional[str] = None
+    lens_name: Optional[str] = None
+    camera_model: Optional[str] = None
     choices: Dict[str, List[str]] = Field(default_factory=dict)
+    current_values: Dict[str, str] = Field(default_factory=dict)
     last_reinit_token: Optional[str] = None
     last_init_at: Optional[str] = None
 

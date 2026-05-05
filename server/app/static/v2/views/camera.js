@@ -125,6 +125,11 @@ async function renderCamera(root, hash) {
   let frameMouseupHandler = null;
   let frameResizeHandler = null;
 
+  // DSLR re-initialize progress: 'idle' | 'saving' | 'waiting' | 'done'
+  let reinitPhase = 'idle';
+  let reinitDoneAt = null;
+  let reinitErrorMsg = null;
+
   async function load() {
     try {
       const data = await api.fetchJson("/api/cameras");
@@ -133,6 +138,16 @@ async function renderCamera(root, hash) {
         renderTopbar([{label:"Dashboard",href:"#/dashboard"},"Unknown"], "");
         root.innerHTML = `<div class="empty"><h3>Camera not found</h3><div class="mono small">${escapeHtml(cameraId)}</div><p style="margin-top:16px"><a class="btn" href="#/dashboard">${icon("back",12)}Back to dashboard</a></p></div>`;
         return;
+      }
+      // Track DSLR re-initialize phase across polls so the status text persists.
+      const dslrCfg0 = camera.config?.dslr || {};
+      const dslrSt0 = camera.status?.dslr || {};
+      const reinitTokenPending = dslrCfg0.reinit_token && dslrCfg0.reinit_token !== dslrSt0.last_reinit_token;
+      if (reinitPhase === 'idle' && reinitTokenPending) {
+        reinitPhase = 'waiting';
+      } else if (reinitPhase === 'waiting' && !reinitTokenPending) {
+        reinitPhase = 'done';
+        reinitDoneAt = dslrSt0.last_init_at || new Date().toISOString();
       }
       // While the user is on the schedule tab, don't re-paint the body — that
       // would destroy the live schedule control mid-edit and silently revert
@@ -1195,27 +1210,56 @@ async function renderCamera(root, hash) {
     return `<label class="field"><span class="lbl">${label}</span><select class="input" id="${id}">${opts}</select></label>`;
   }
 
+  function reinitStatusHtml() {
+    if (reinitPhase === 'saving')  return `<span style="color:var(--soft)">Saving…</span>`;
+    if (reinitPhase === 'waiting') return `<span style="color:var(--soft)">Waiting for agent…</span>`;
+    if (reinitPhase === 'done') {
+      const when = reinitDoneAt ? relativeTime(reinitDoneAt) : 'just now';
+      return `<span style="color:var(--green,#22c55e)">Done — re-initialized ${escapeHtml(when)}</span>`;
+    }
+    if (reinitErrorMsg) return `<span style="color:var(--red)">${escapeHtml(reinitErrorMsg)}</span>`;
+    return '';
+  }
+
   function renderDslrSection(cfg, status) {
     const dslrCfg = cfg.dslr || {};
     const dslrSt = status && status.dslr || {};
     const choices = dslrSt.choices || {};
+    const currentValues = dslrSt.current_values || {};
     const expMode = dslrSt.exposure_mode || '—';
     const expBadge = expMode === 'M'
       ? `<span style="color:var(--green,#22c55e)">${escapeHtml(expMode)}</span>`
       : `<span style="color:var(--amber,#f59e0b)">${escapeHtml(expMode)} — manual mode recommended</span>`;
-    const reinitPending = dslrCfg.reinit_token && dslrCfg.reinit_token !== dslrSt.last_reinit_token;
+    const reinitInFlight = reinitPhase === 'saving' || reinitPhase === 'waiting';
 
-    const initOpts = (key, field, def) => DSLR_INIT_CHOICES[key].map(v =>
-      `<option value="${escapeHtml(v)}" ${v === (dslrCfg[field] || def) ? 'selected' : ''}>${escapeHtml(v)}</option>`
+    // Pre-select live current value when present, fall back to saved config, then default.
+    const sel = (gphotoKey, field) => currentValues[gphotoKey] || dslrCfg[field] || '';
+    const initOpts = (gphotoKey, field, def) => DSLR_INIT_CHOICES[gphotoKey].map(v =>
+      `<option value="${escapeHtml(v)}" ${v === (currentValues[gphotoKey] || dslrCfg[field] || def) ? 'selected' : ''}>${escapeHtml(v)}</option>`
     ).join('');
+
+    // Battery / available shots / shutter count are Canon-only PTP properties; on
+    // Sony bodies these fields stay null. Rather than render permanent em-dashes
+    // we only show each row when the body actually reports a value.
+    const statTile = (label, value) => value == null
+      ? ''
+      : `<div><div class="lbl" style="font-size:11px">${label}</div>${value}</div>`;
+    const tiles = [
+      statTile('Battery', dslrSt.battery_level ? escapeHtml(dslrSt.battery_level) : null),
+      statTile('Available shots', dslrSt.available_shots != null ? Number(dslrSt.available_shots).toLocaleString() : null),
+      statTile('Shutter count', dslrSt.shutter_counter != null ? Number(dslrSt.shutter_counter).toLocaleString() : null),
+    ].filter(Boolean).join('');
+    const camera = dslrSt.lens_name || dslrSt.camera_model || '—';
+    const cameraLabel = dslrSt.lens_name ? 'Lens' : 'Camera';
+    const lastInit = dslrSt.last_init_at ? relativeTime(dslrSt.last_init_at) : '—';
 
     return `
       <div class="card" style="margin-top:14px"><div class="card-b">
         <div class="lbl">DSLR Status</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px;font-size:13px">
-          <div><div class="lbl" style="font-size:11px">Battery</div>${escapeHtml(dslrSt.battery_level || '—')}</div>
-          <div><div class="lbl" style="font-size:11px">Available shots</div>${dslrSt.available_shots != null ? Number(dslrSt.available_shots).toLocaleString() : '—'}</div>
-          <div><div class="lbl" style="font-size:11px">Shutter count</div>${dslrSt.shutter_counter != null ? Number(dslrSt.shutter_counter).toLocaleString() : '—'}</div>
+        ${tiles ? `<div style="display:grid;grid-template-columns:repeat(${tiles.match(/<div>/g).length},1fr);gap:8px;margin-top:12px;font-size:13px">${tiles}</div>` : ''}
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-top:10px;font-size:13px">
+          <div><div class="lbl" style="font-size:11px">${cameraLabel}</div>${escapeHtml(camera)}</div>
+          <div><div class="lbl" style="font-size:11px">Last initialized</div>${escapeHtml(lastInit)}</div>
         </div>
         <div style="margin-top:8px;font-size:13px"><span class="lbl" style="font-size:11px">Exposure mode</span> ${expBadge}</div>
       </div></div>
@@ -1234,20 +1278,20 @@ async function renderCamera(root, hash) {
           </label>
         </div>
         <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
-          <button class="btn" data-reinit>${reinitPending ? '⏳ Re-initializing…' : 'Re-initialize'}</button>
-          <span class="small" id="reinit-msg"></span>
+          <button class="btn" data-reinit ${reinitInFlight ? 'disabled' : ''}>${reinitInFlight ? '⏳ Re-initializing…' : 'Re-initialize'}</button>
+          <span class="small" id="reinit-msg">${reinitStatusHtml()}</span>
         </div>
       </div></div>
 
       <div class="card" style="margin-top:14px"><div class="card-b">
         <div class="lbl">Capture Settings</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
-          ${dslrSelect('d-shutterspeed','Shutter speed','shutterspeed',choices.shutterspeed||DSLR_DEFAULTS.shutterspeed,dslrCfg.shutterspeed)}
-          ${dslrSelect('d-aperture','Aperture','aperture',choices.aperture||DSLR_DEFAULTS.aperture,dslrCfg.aperture)}
-          ${dslrSelect('d-iso','ISO','iso',choices.iso||DSLR_DEFAULTS.iso,dslrCfg.iso)}
-          ${dslrSelect('d-expcomp','Exposure comp.','exposurecompensation',choices.exposurecompensation||DSLR_DEFAULTS.exposurecompensation,dslrCfg.exposure_compensation)}
-          ${dslrSelect('d-wb','White balance','whitebalance',choices.whitebalance||DSLR_DEFAULTS.whitebalance,dslrCfg.whitebalance)}
-          ${dslrSelect('d-fmt','Image format','imageformat',choices.imageformat||DSLR_DEFAULTS.imageformat,dslrCfg.image_format)}
+          ${dslrSelect('d-shutterspeed','Shutter speed','shutterspeed',choices.shutterspeed||DSLR_DEFAULTS.shutterspeed,sel('shutterspeed','shutterspeed'))}
+          ${dslrSelect('d-aperture','Aperture','aperture',choices.aperture||DSLR_DEFAULTS.aperture,sel('aperture','aperture'))}
+          ${dslrSelect('d-iso','ISO','iso',choices.iso||DSLR_DEFAULTS.iso,sel('iso','iso'))}
+          ${dslrSelect('d-expcomp','Exposure comp.','exposurecompensation',choices.exposurecompensation||DSLR_DEFAULTS.exposurecompensation,sel('exposurecompensation','exposure_compensation'))}
+          ${dslrSelect('d-wb','White balance','whitebalance',choices.whitebalance||DSLR_DEFAULTS.whitebalance,sel('whitebalance','whitebalance'))}
+          ${dslrSelect('d-fmt','Image format','imageformat',choices.imageformat||DSLR_DEFAULTS.imageformat,sel('imageformat','image_format'))}
         </div>
       </div></div>`;
   }
@@ -1345,14 +1389,23 @@ async function renderCamera(root, hash) {
       reinitBtn.addEventListener("click", async () => {
         const payload = { ...buildBasePayload(), dslr: buildDslrPayload(true) };
         const msgEl = document.getElementById("reinit-msg");
+        reinitPhase = 'saving';
+        reinitErrorMsg = null;
+        reinitDoneAt = null;
+        reinitBtn.disabled = true;
+        reinitBtn.textContent = "⏳ Re-initializing…";
+        if (msgEl) msgEl.innerHTML = reinitStatusHtml();
         try {
           camera.config = await api.fetchJson(`/api/cameras/${encId}/config`, { method:"PUT", body: JSON.stringify(payload) });
-          reinitBtn.textContent = "⏳ Re-initializing…";
-          reinitBtn.disabled = true;
-          if (msgEl) { msgEl.textContent = "Sent. Camera will re-initialize on next poll."; msgEl.style.color = "var(--green)"; }
+          reinitPhase = 'waiting';
+          if (msgEl) msgEl.innerHTML = reinitStatusHtml();
           invalidateSidebar();
         } catch (e) {
-          if (msgEl) { msgEl.textContent = e.message; msgEl.style.color = "var(--red)"; }
+          reinitPhase = 'idle';
+          reinitErrorMsg = e.message;
+          reinitBtn.disabled = false;
+          reinitBtn.textContent = "Re-initialize";
+          if (msgEl) msgEl.innerHTML = reinitStatusHtml();
         }
       });
     }

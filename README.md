@@ -175,6 +175,7 @@ curl -X POST http://<SERVER_IP>:8080/api/cameras/<CAMERA_ID>/videos \
    ```bash
    scripts/build-release.sh --out /srv/timelapse/releases
    ```
+   The release directory is `${TIMELAPSE_DATA_DIR}/releases`. On a default install that's `/srv/timelapse/releases`. Building into the wrong directory is a common cause of `Release X not staged on server` from the manifest endpoint.
 3. Set the desired version on each camera:
    ```bash
    curl -X PUT http://<SERVER_IP>:8080/api/cameras/<CAMERA_ID>/config \
@@ -191,6 +192,43 @@ curl -X POST http://<SERVER_IP>:8080/api/cameras/<CAMERA_ID>/videos \
 4. Within one poll cycle (default 60s) the agent downloads, verifies, installs, and restarts on the new version. The next heartbeat reports the new `agent_version`.
 
 If the install fails, the agent logs `Update failed: ...` and stays on the old version. Watch with `journalctl -u timelapse-agent -f` on the Pi during rollouts.
+
+**When the change spans agent + server.** The agent ships in a tarball and updates itself on the next poll, but the server (FastAPI / Pydantic models) only picks up edits when uvicorn restarts. If a release adds or renames fields on the checkin payload (e.g. `DslrStatus.lens_name`, `DslrStatus.current_values`), restart the server *before* the new agent first checks in — Pydantic silently drops unknown fields by default, so the data appears to flow but never lands.
+
+```bash
+sudo systemctl restart timelapse-server
+```
+
+---
+
+## DSLR cameras (gphoto2 backend)
+
+The agent supports two capture backends: `rpicam` for Pi Camera modules and `gphoto2` for USB-tethered DSLRs (tested with the Canon R6). The active backend is auto-detected unless `CameraConfig.camera_backend` is pinned.
+
+### Data model
+
+When `active_backend == "gphoto2"`, every checkin includes a `dslr` payload populated by `gphoto2_read_choices_and_current()`, `gphoto2_read_current_values()`, and `gphoto2_read_telemetry()` in `agent/timelapse_agent.py`:
+
+| Field | Source | Refreshed |
+|---|---|---|
+| `battery_level`, `available_shots`, `shutter_counter`, `exposure_mode`, `lens_name` | `gphoto2 --get-config <key>` `Current:` line | every poll |
+| `choices` (per-setting option lists) | `gphoto2 --get-config` `Choice:` lines | only on init/reinit |
+| `current_values` (per-setting active value) | `gphoto2 --get-config` `Current:` line | every poll |
+| `last_reinit_token`, `last_init_at` | agent state | on reinit |
+
+`CameraConfig.dslr` (a `DslrSettings`) holds the user's saved selections plus a `reinit_token`. To trigger a re-initialization, the UI writes a fresh ISO-timestamp into `reinit_token`; the agent compares it against `state.last_reinit_token` on the next poll and, on mismatch, calls `gphoto2_apply_init_settings()` then re-reads choices and current values.
+
+### UI rendering
+
+The DSLR section in the camera Settings tab (`server/app/static/v2/views/camera.js` → `renderDslrSection`) only renders when `cfg.camera_backend === 'gphoto2'` **or** `status.active_backend === 'gphoto2'`. Dropdowns pre-select `current_values[gphotoKey]` first, falling back to the saved `dslrCfg[field]`. The Re-initialize button surfaces a phase tracker (`saving → waiting → done`) that survives page reloads via the camera's `reinit_token` / `last_reinit_token` mismatch.
+
+### Testing without hardware
+
+`scripts/simulate-dslr.sh` posts a realistic Canon R6 fixture (lens name, full `choices`/`current_values`, battery, shutter count) and applies any new `reinit_token` after a 1s delay so the full re-init flow is exercisable. Run it against the dev server and the `dslr-test` camera will show populated dropdowns and the lens line within one tick.
+
+```bash
+./scripts/simulate-dslr.sh dslr-test http://127.0.0.1:8080 30
+```
 
 ---
 
