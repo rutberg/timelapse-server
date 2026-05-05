@@ -78,12 +78,10 @@ def build_install_script(
         {bootstrap}sudo apt-get update
         sudo apt-get install -y rpicam-apps-lite python3 gphoto2
 
-        # USB DSLR support: allow non-root agent process to claim the camera.
-        # Canon's USB vendor ID is 04a9; the rule below grants plugdev members
-        # read/write access. Other vendors can be added the same way.
+        # USB DSLR support: allow non-root agent process to claim any PTP/MTP
+        # camera. Matching on bDeviceClass 6 (Still Image) covers all vendors.
         sudo tee /etc/udev/rules.d/90-timelapse-dslr.rules >/dev/null <<'TIMELAPSE_UDEV_EOF'
-        # Canon (04a9) — covers EOS R6 and other Canon PTP cameras
-        SUBSYSTEMS=="usb", ATTRS{{idVendor}}=="04a9", GROUP="plugdev", MODE="0664"
+        SUBSYSTEMS=="usb", ATTRS{{bDeviceClass}}=="06", GROUP="plugdev", MODE="0664"
         TIMELAPSE_UDEV_EOF
         sudo udevadm control --reload-rules
         sudo udevadm trigger

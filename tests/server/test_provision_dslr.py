@@ -19,10 +19,11 @@ def test_script_installs_libgphoto2_runtime():
     assert "gphoto2" in script()
 
 
-def test_script_writes_canon_udev_rule():
+def test_script_writes_still_image_udev_rule():
     s = script()
-    # Canon's USB vendor ID is 04a9 (lowercase hex).
-    assert "04a9" in s
+    # bDeviceClass 6 = USB Still Image — covers all PTP/MTP cameras regardless of vendor.
+    assert "bDeviceClass" in s
+    assert '"06"' in s
     assert "/etc/udev/rules.d/" in s
     assert 'GROUP="plugdev"' in s
 
