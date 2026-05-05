@@ -502,6 +502,53 @@ def find_capture_command() -> Optional[str]:
     return None
 
 
+def gphoto2_available() -> bool:
+    """Return True if the gphoto2 binary is installed AND a camera is currently
+    attached and visible to libgphoto2 over USB.
+
+    `gphoto2 --auto-detect` always exits 0; an empty list is signalled by the
+    output containing only the two-line header. We detect a camera by counting
+    non-header lines.
+    """
+    if not shutil.which("gphoto2"):
+        return False
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--auto-detect"],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    if result.returncode != 0:
+        return False
+    # Output format:
+    #   Model                          Port
+    #   ----------------------------------------------------------
+    #   Canon EOS R6                   usb:001,005
+    for line in result.stdout.splitlines()[2:]:
+        if line.strip():
+            return True
+    return False
+
+
+def resolve_active_backend(config: Dict[str, Any]) -> Optional[str]:
+    """Pick which capture backend to use given the server config.
+
+    Returns 'rpicam', 'gphoto2', or None if neither is available.
+    """
+    requested = config.get("camera_backend", "auto")
+    if requested == "rpicam":
+        return "rpicam" if find_capture_command() else None
+    if requested == "gphoto2":
+        return "gphoto2" if gphoto2_available() else None
+    # auto: prefer gphoto2 (more specialised) when a USB camera is present
+    if gphoto2_available():
+        return "gphoto2"
+    if find_capture_command():
+        return "rpicam"
+    return None
+
+
 def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
     quality = str(config.get("jpeg_quality", DEFAULT_REMOTE_CONFIG["jpeg_quality"]))
 
