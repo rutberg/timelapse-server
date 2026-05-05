@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -1044,6 +1044,7 @@ def serve_release(filename: str) -> FileResponse:
 @app.post("/api/cameras/{camera_id}/upload")
 async def upload_image(
     camera_id: str,
+    background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
     x_captured_at: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
@@ -1054,7 +1055,7 @@ async def upload_image(
     with destination.open("wb") as output_file:
         shutil.copyfileobj(image.file, output_file)
 
-    await asyncio.to_thread(
+    background_tasks.add_task(
         ensure_frame_thumbnail,
         destination,
         thumbnail_path(camera_id, destination.parent.name, destination.name),
