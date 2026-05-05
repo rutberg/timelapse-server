@@ -39,6 +39,7 @@ export function openRenderModal(cameraId, initialRangeHours = 24) {
     let fps = 24,
         format = "mp4",
         busy = false,
+        progress = 0,
         message = "";
 
     let startDate,
@@ -123,6 +124,11 @@ export function openRenderModal(cameraId, initialRangeHours = 24) {
             ${["mp4", "gif"].map((f) => `<button data-fmt="${f}" class="${f === format ? "active" : ""}">${f.toUpperCase()}</button>`).join("")}
           </div>
         </div>
+        ${busy ? `
+        <div style="margin-top:14px">
+          <progress value="${progress}" max="100" style="width:100%"></progress>
+          <div class="mono small" style="text-align:center;margin-top:4px">${progress}%</div>
+        </div>` : ""}
         ${message ? `<div class="small" style="margin-top:14px;color:${message.startsWith("Error") ? "var(--red)" : "var(--green)"}">${escapeHtml(message)}</div>` : ""}
       </div>
       <div class="modal-foot">
@@ -183,28 +189,48 @@ export function openRenderModal(cameraId, initialRangeHours = 24) {
             .querySelector("#r-go")
             ?.addEventListener("click", async () => {
                 busy = true;
+                progress = 0;
                 message = "";
                 rerender();
                 try {
                     const startAt = `${startDate}T${startHour.toString().padStart(2, "0")}:00:00`;
                     const endAt = `${endDate}T${endHour.toString().padStart(2, "0")}:59:59`;
-
-                    const r = await api.fetchJson(
-                        `/api/cameras/${encId}/videos`,
-                        {
-                            method: "POST",
-                            body: JSON.stringify({
-                                start_at: startAt,
-                                end_at: endAt,
-                                fps,
-                                format,
-                            }),
-                        },
-                    );
-                    const filename = (r.path || "").split("/").pop();
-                    message = `Rendered ${r.path}`;
-                    busy = false;
-                    rerender();
+                    const response = await fetch(`/api/cameras/${encId}/videos`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ start_at: startAt, end_at: endAt, fps, format }),
+                    });
+                    if (!response.ok || !response.body) {
+                        throw new Error((await response.text()) || "Failed to render video");
+                    }
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = "";
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const events = buffer.split("\n\n");
+                        buffer = events.pop() || "";
+                        for (const rawEvent of events) {
+                            const lines = rawEvent.split("\n");
+                            const eventType = lines.find((l) => l.startsWith("event:"))?.slice(6).trim();
+                            const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
+                            if (!eventType || !dataLine) continue;
+                            const data = JSON.parse(dataLine);
+                            if (eventType === "progress") {
+                                progress = data.percent;
+                                rerender();
+                            } else if (eventType === "done") {
+                                message = `Rendered ${data.path}`;
+                                busy = false;
+                                progress = 100;
+                                rerender();
+                            } else if (eventType === "error") {
+                                throw new Error(data.detail || "Render failed");
+                            }
+                        }
+                    }
                 } catch (e) {
                     busy = false;
                     message = "Error: " + e.message;
