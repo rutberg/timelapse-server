@@ -967,13 +967,10 @@ def now_local_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def capture_frame(work_dir: Path, config: Dict[str, Any]):
+def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
     """Trigger a capture using the configured backend.
 
-    Returns:
-        - For 'rpicam' backend: pathlib.Path to the JPEG written under work_dir/pending/.
-        - For 'gphoto2' backend: a CameraFileRef pointing to the newly captured
-          file still residing on the camera SD card.
+    Always returns a pathlib.Path to a JPEG written under work_dir/pending/.
     """
     backend = resolve_active_backend(config)
     if backend is None:
@@ -982,10 +979,29 @@ def capture_frame(work_dir: Path, config: Dict[str, Any]):
             "or gphoto2 + a USB DSLR"
         )
 
+    captured_at_filename = datetime.now().strftime("%Y%m%dT%H%M%S")
+    output_path = work_dir / "pending" / f"{captured_at_filename}.jpg"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(".tmp.jpg")
+
     if backend == "gphoto2":
-        ref = gphoto2_capture_trigger()
-        add_camera_pending(work_dir, ref, captured_at=now_local_iso())
-        return ref
+        # Use --capture-image-and-download so the file lands on local disk
+        # immediately. Some cameras (e.g. Sony RX100) keep the captured file
+        # only in RAM; a separate --get-file call issued even seconds later
+        # finds nothing. Downloading inline avoids that race.
+        subprocess.run(
+            [
+                "gphoto2",
+                "--capture-image-and-download",
+                "--filename", str(temp_path),
+                "--force-overwrite",
+            ],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        temp_path.replace(output_path)
+        metadata = {"captured_at": now_local_iso(), "hostname": socket.gethostname()}
+        write_json(output_path.with_suffix(".json"), metadata)
+        return output_path
 
     # rpicam path (unchanged behaviour)
     command = find_capture_command()
