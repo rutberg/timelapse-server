@@ -99,6 +99,31 @@ async function renderCamera(root, hash) {
   let pollTimer = null;
   let scheduleCtl = null;
   let scheduleDirty = null; // unsaved schedule edits
+  const framesState = {
+    archiveLoaded: false,
+    mounted: false,
+    months: [],
+    days: [],
+    monthOpen: new Set(),
+    activeDay: "",
+    daySummary: null,
+    frames: [],
+    selected: new Set(),
+    lastSelectedCursor: null,
+    groupBy: window.localStorage?.getItem(`frames:${cameraId}:groupBy`) || "hour",
+    density: window.localStorage?.getItem(`frames:${cameraId}:density`) || "",
+    cursor: null,
+    loading: false,
+    error: "",
+    warping: false,
+  };
+  let frameMarquee = null;
+  let frameMarqueeMoved = false;
+  let frameMarqueeBase = null;
+  let frameKeydownHandler = null;
+  let frameMousemoveHandler = null;
+  let frameMouseupHandler = null;
+  let frameResizeHandler = null;
 
   async function load() {
     try {
@@ -114,6 +139,10 @@ async function renderCamera(root, hash) {
       // unsaved selections. Just push the latest light reading into the control.
       if (tab === "schedule" && scheduleCtl) {
         scheduleCtl.setCurrentLight(camera.status?.current_light);
+        return;
+      }
+      if (tab === "frames" && framesState.mounted) {
+        updateFrameToolbar();
         return;
       }
       paint();
@@ -146,6 +175,7 @@ async function renderCamera(root, hash) {
     if (tab === "schedule") wireSchedule();
     if (tab === "settings") wireSettings();
     if (tab === "renders") wireRenders();
+    if (tab === "frames") wireFrames();
 
     root.querySelector('[data-action="render"]')?.addEventListener("click", async () => {
       const { openRenderModal } = await import("/static/v2/views/library.js");
@@ -246,13 +276,747 @@ async function renderCamera(root, hash) {
 
   function renderFramesTab() {
     return `
-      <div style="padding:24px">
-        <div class="lbl">Recent frames</div>
-        <div class="small" style="margin-top:6px">A scrubbable browser of every frame this camera has captured. Wire up to <span class="mono" style="color:var(--ink)">/api/cameras/${escapeHtml(cameraId)}/frames</span> when the endpoint exists.</div>
-        <div class="frame-strip" style="margin-top:14px">
-          ${Array.from({length: 18}).map((_,i)=>`<div class="frame scene scene-${["day","overcast","dusk","night"][i%4]}"><div class="stamp-mini">${14-Math.floor(i/2)}:${(60-i*5+60)%60}</div></div>`).join("")}
+      <div class="frames-browser">
+        <aside class="frames-rail">
+          <div class="frames-rail-search">
+            <input class="input" id="frames-search" placeholder="Search dates…" />
+          </div>
+          <div id="frames-archive-rail" class="frames-archive-rail">
+            <div class="loading mono small">Loading archive…</div>
+          </div>
+        </aside>
+
+        <section class="frames-main">
+          <div class="frames-toolbar">
+            <div>
+              <div class="lbl">Frames</div>
+              <div class="frames-day-title" id="frames-day-title">Loading…</div>
+              <div class="small" id="frames-day-sub">Preparing archive</div>
+            </div>
+            <div class="row frames-toolbar-controls">
+              <div class="seg" id="frames-group-by">
+                ${["hour","day","week"].map((value) => `<button data-group="${value}" class="${framesState.groupBy === value ? "active" : ""}">${value}</button>`).join("")}
+              </div>
+              <div class="seg" id="frames-density">
+                <button data-density="dense" class="${framesState.density === "dense" ? "active" : ""}">S</button>
+                <button data-density="" class="${framesState.density === "" ? "active" : ""}">M</button>
+                <button data-density="large" class="${framesState.density === "large" ? "active" : ""}">L</button>
+              </div>
+              <button class="btn sm" id="frames-warp-toggle">${icon("play",11)}Time-warp</button>
+              <button class="btn sm" id="frames-refresh">${icon("refresh",12)}Refresh</button>
+            </div>
+          </div>
+
+          <div class="frames-scrub-head">
+            <div class="between" style="align-items:baseline;margin-bottom:8px">
+              <div class="mono" id="frames-scrub-title">${escapeHtml(framesState.activeDay || "—")}</div>
+              <div class="lbl">Click scrubber to jump · arrows scrub hours</div>
+            </div>
+            <div class="frames-scrubber" id="frames-scrubber">
+              <div class="frames-scrubber-density" id="frames-scrubber-density"></div>
+              <div class="frames-scrubber-hours">${Array.from({length: 8}, (_, i) => `<span>${String(i * 3).padStart(2, "0")}</span>`).join("")}</div>
+              <div class="frames-scrubber-window" id="frames-scrubber-window"></div>
+              <div class="frames-warp-cursor" id="frames-warp-cursor"></div>
+              <div class="frames-warp-preview" id="frames-warp-preview"></div>
+            </div>
+          </div>
+
+          <div class="frames-grid-scroll" id="frames-grid-scroll">
+            <div class="loading mono small">Loading frames…</div>
+          </div>
+
+          <div class="frames-selection-bar" id="frames-selection-bar">
+            <span><span class="num" id="frames-selection-count">0</span> selected</span>
+            <span class="mono" id="frames-selection-range">—</span>
+            <span class="frames-selection-sep"></span>
+            <button type="button" data-render-selection>Render clip</button>
+            <button type="button" class="danger-dark" data-delete-selection>Delete</button>
+            <button type="button" data-clear-selection>Clear</button>
+          </div>
+        </section>
+
+        <div class="frames-lightbox" id="frames-lightbox" aria-hidden="true"></div>
+      </div>`;
+  }
+
+  function wireFrames() {
+    removeFrameGlobalListeners();
+    framesState.mounted = true;
+    root.querySelector("#frames-group-by")?.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-group]");
+      if (!button) return;
+      framesState.groupBy = button.dataset.group;
+      window.localStorage?.setItem(`frames:${cameraId}:groupBy`, framesState.groupBy);
+      paintFrames();
+    });
+    root.querySelector("#frames-density")?.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-density]");
+      if (!button) return;
+      framesState.density = button.dataset.density;
+      window.localStorage?.setItem(`frames:${cameraId}:density`, framesState.density);
+      paintFrames();
+    });
+    root.querySelector("#frames-search")?.addEventListener("input", paintFrameRail);
+    root.querySelector("#frames-refresh")?.addEventListener("click", () => loadFrameArchive({ keepDay: true }));
+    root.querySelector("#frames-warp-toggle")?.addEventListener("click", toggleFrameWarp);
+    root.querySelector("#frames-scrubber")?.addEventListener("mousemove", updateFrameWarpPreview);
+    root.querySelector("#frames-scrubber")?.addEventListener("mouseleave", () => {
+      const preview = root.querySelector("#frames-warp-preview");
+      if (preview) preview.innerHTML = "";
+    });
+    root.querySelector("#frames-scrubber")?.addEventListener("click", scrubFramesToEvent);
+    root.querySelector("#frames-grid-scroll")?.addEventListener("scroll", () => {
+      window.requestAnimationFrame(updateFrameScrubberWindow);
+    });
+    root.querySelector("[data-clear-selection]")?.addEventListener("click", clearFrameSelection);
+    root.querySelector("[data-delete-selection]")?.addEventListener("click", deleteSelectedFrames);
+    root.querySelector("[data-render-selection]")?.addEventListener("click", async () => {
+      const { openRenderModal } = await import("/static/v2/views/library.js");
+      openRenderModal(cameraId);
+    });
+
+    root.querySelector("#frames-grid-scroll")?.addEventListener("mousedown", startFrameMarquee);
+    frameMousemoveHandler = moveFrameMarquee;
+    frameMouseupHandler = endFrameMarquee;
+    frameKeydownHandler = handleFrameKeyboard;
+    frameResizeHandler = updateFrameScrubberWindow;
+    window.addEventListener("mousemove", frameMousemoveHandler);
+    window.addEventListener("mouseup", frameMouseupHandler);
+    window.addEventListener("keydown", frameKeydownHandler);
+    window.addEventListener("resize", frameResizeHandler);
+
+    if (!framesState.archiveLoaded && !framesState.loading) {
+      loadFrameArchive();
+    } else {
+      paintFrameRail();
+      paintFrames();
+    }
+  }
+
+  function removeFrameGlobalListeners() {
+    if (frameMousemoveHandler) window.removeEventListener("mousemove", frameMousemoveHandler);
+    if (frameMouseupHandler) window.removeEventListener("mouseup", frameMouseupHandler);
+    if (frameKeydownHandler) window.removeEventListener("keydown", frameKeydownHandler);
+    if (frameResizeHandler) window.removeEventListener("resize", frameResizeHandler);
+    frameMousemoveHandler = null;
+    frameMouseupHandler = null;
+    frameKeydownHandler = null;
+    frameResizeHandler = null;
+  }
+
+  async function loadFrameArchive({ keepDay = false } = {}) {
+    if (framesState.loading) return;
+    framesState.loading = true;
+    framesState.error = "";
+    paintFrameLoading("Loading archive…");
+    try {
+      const data = await api.fetchJson(`/api/cameras/${encId}/frame-days`);
+      framesState.days = data.days || [];
+      framesState.months = data.months || [];
+      framesState.archiveLoaded = true;
+      if (!keepDay || !framesState.days.some(day => day.day === framesState.activeDay)) {
+        framesState.activeDay = framesState.days[0]?.day || "";
+      }
+      if (framesState.activeDay) framesState.monthOpen.add(framesState.activeDay.slice(0, 7));
+      paintFrameRail();
+      if (framesState.activeDay) await loadFrameDay(framesState.activeDay);
+      else {
+        framesState.daySummary = null;
+        framesState.frames = [];
+        framesState.cursor = null;
+        paintFrames();
+      }
+    } catch (e) {
+      framesState.error = e.message;
+      paintFrames();
+    } finally {
+      framesState.loading = false;
+    }
+  }
+
+  async function loadFrameDay(day) {
+    framesState.activeDay = day;
+    framesState.daySummary = framesState.days.find(entry => entry.day === day) || null;
+    framesState.selected.clear();
+    framesState.lastSelectedCursor = null;
+    framesState.frames = [];
+    framesState.cursor = null;
+    framesState.loading = true;
+    framesState.error = "";
+    paintFrames();
+    try {
+      const params = new URLSearchParams({ day, order: "asc", limit: "5000" });
+      const data = await api.fetchJson(`/api/cameras/${encId}/frames?${params}`);
+      framesState.frames = data.frames || [];
+      framesState.cursor = data.next_cursor || null;
+      framesState.monthOpen.add(day.slice(0, 7));
+      paintFrameRail();
+      paintFrames();
+    } catch (e) {
+      framesState.error = e.message;
+      paintFrames();
+    } finally {
+      framesState.loading = false;
+    }
+  }
+
+  function paintFrameLoading(message) {
+    const grid = root.querySelector("#frames-grid-scroll");
+    if (grid) grid.innerHTML = `<div class="loading mono small">${escapeHtml(message)}</div>`;
+  }
+
+  function paintFrameRail() {
+    const rail = root.querySelector("#frames-archive-rail");
+    if (!rail) return;
+    const query = (root.querySelector("#frames-search")?.value || "").trim().toLowerCase();
+    if (!framesState.days.length) {
+      rail.innerHTML = `<div class="empty"><h3>No frames</h3><p>No captures have been uploaded yet.</p></div>`;
+      return;
+    }
+    const daysByMonth = new Map();
+    for (const day of framesState.days) {
+      if (query && !day.day.toLowerCase().includes(query) && !formatDayShort(day.day).toLowerCase().includes(query)) continue;
+      if (!daysByMonth.has(day.month)) daysByMonth.set(day.month, []);
+      daysByMonth.get(day.month).push(day);
+    }
+    const railHtml = framesState.months.map((month) => {
+      const days = daysByMonth.get(month.month) || [];
+      if (query && !days.length) return "";
+      const open = framesState.monthOpen.has(month.month);
+      return `
+        <div class="frames-month ${open ? "open" : ""}">
+          <button class="frames-month-head" data-month="${escapeHtml(month.month)}" type="button">
+            <span class="frames-chev">▶</span>
+            <span class="frames-month-name">${escapeHtml(formatMonthLabel(month.month))}</span>
+            <span class="frames-month-meta">${fmtNum(month.frame_count)} · ${month.day_count}d${month.gap_count ? ` · ${month.gap_count} gaps` : ""}</span>
+          </button>
+          <div class="frames-month-days">
+            ${days.map(renderFrameDayRow).join("")}
+          </div>
+        </div>`;
+    }).join("").trim();
+    rail.innerHTML = railHtml || `<div class="empty"><h3>No matches</h3><p>No captured days match that search.</p></div>`;
+    rail.querySelectorAll("[data-month]").forEach(button => {
+      button.addEventListener("click", () => {
+        const month = button.dataset.month;
+        if (framesState.monthOpen.has(month)) framesState.monthOpen.delete(month);
+        else framesState.monthOpen.add(month);
+        paintFrameRail();
+      });
+    });
+    rail.querySelectorAll("[data-frame-day]").forEach(button => {
+      button.addEventListener("click", () => loadFrameDay(button.dataset.frameDay));
+    });
+  }
+
+  function renderFrameDayRow(day) {
+    const active = day.day === framesState.activeDay;
+    return `
+      <button class="frames-day-row ${active ? "active" : ""}" data-frame-day="${escapeHtml(day.day)}" type="button">
+        <span class="frames-day-date">${escapeHtml(formatDayShort(day.day))}</span>
+        <span class="frames-day-meta">
+          <span>${fmtNum(day.count)}</span>
+          ${day.gap_count ? `<span class="gap">${day.gap_count} gap${day.gap_count > 1 ? "s" : ""}</span>` : ""}
+        </span>
+      </button>`;
+  }
+
+  function paintFrames() {
+    const grid = root.querySelector("#frames-grid-scroll");
+    if (!grid) return;
+    updateFrameToolbar();
+    if (framesState.error) {
+      grid.innerHTML = `<div class="banner bad">${icon("alert",14)}<div class="small">${escapeHtml(framesState.error)}</div></div>`;
+      updateFrameSelectionUI();
+      return;
+    }
+    if (framesState.loading && !framesState.frames.length) {
+      grid.innerHTML = `<div class="loading mono small">Loading frames…</div>`;
+      return;
+    }
+    if (!framesState.activeDay || !framesState.frames.length) {
+      grid.innerHTML = `<div class="empty"><h3>No frames</h3><p>${framesState.activeDay ? "No captures for this day." : "This camera has not uploaded frames yet."}</p></div>`;
+      updateFrameSelectionUI();
+      return;
+    }
+    const groups = buildFrameGroups();
+    grid.innerHTML = groups.map(renderFrameGroup).join("") + `<div class="frames-grid-tail"></div>`;
+    grid.querySelectorAll("[data-frame-cursor]").forEach(tile => {
+      tile.addEventListener("mousedown", event => event.stopPropagation());
+      tile.addEventListener("click", event => selectFrameFromEvent(event, tile.dataset.frameCursor));
+      tile.addEventListener("dblclick", () => openFrameLightbox(tile.dataset.frameCursor));
+    });
+    grid.querySelectorAll("[data-select-group]").forEach(button => {
+      button.addEventListener("click", () => {
+        const key = button.dataset.selectGroup;
+        const group = groups.find(item => item.key === key);
+        if (!group) return;
+        for (const frame of group.items.filter(item => item.type === "frame").map(item => item.frame)) {
+          framesState.selected.add(frame.cursor);
+        }
+        updateFrameSelectionUI();
+      });
+    });
+    renderFrameScrubber();
+    updateFrameSelectionUI();
+    window.requestAnimationFrame(updateFrameScrubberWindow);
+  }
+
+  function updateFrameToolbar() {
+    const title = root.querySelector("#frames-day-title");
+    const sub = root.querySelector("#frames-day-sub");
+    const scrubTitle = root.querySelector("#frames-scrub-title");
+    if (title) title.textContent = framesState.activeDay ? formatDayTitle(framesState.activeDay) : "No frames";
+    if (scrubTitle) scrubTitle.textContent = framesState.activeDay || "—";
+    if (sub) {
+      const summary = framesState.daySummary;
+      sub.textContent = summary
+        ? `${fmtNum(summary.count)} frames · ${formatDayRange(summary)}${summary.gap_count ? ` · ${summary.gap_count} gap${summary.gap_count > 1 ? "s" : ""}` : " · no gaps"}`
+        : `${fmtNum(camera.image_count)} total frames`;
+    }
+    root.querySelectorAll("#frames-group-by button").forEach(button => button.classList.toggle("active", button.dataset.group === framesState.groupBy));
+    root.querySelectorAll("#frames-density button").forEach(button => button.classList.toggle("active", button.dataset.density === framesState.density));
+    root.querySelector("#frames-warp-toggle")?.classList.toggle("primary", framesState.warping);
+  }
+
+  function buildFrameGroups() {
+    const gapsByAfter = new Map((framesState.daySummary?.gaps || []).map(gap => [gap.after, gap]));
+    const groups = [];
+    let current = null;
+    for (const frame of framesState.frames) {
+      const key = frameGroupKey(frame);
+      if (!current || current.key !== key) {
+        current = { key, label: frameGroupLabel(frame), minute: frameMinute(frame), items: [] };
+        groups.push(current);
+      }
+      current.items.push({ type: "frame", frame });
+      const gap = gapsByAfter.get(frame.cursor);
+      if (gap) current.items.push({ type: "gap", gap });
+    }
+    return groups;
+  }
+
+  function renderFrameGroup(group) {
+    let html = `
+      <div class="frames-group-head" data-group-key="${escapeHtml(group.key)}" data-minute="${group.minute}">
+        <span class="frames-group-title">${escapeHtml(group.label)}</span>
+        <span class="frames-group-meta">${fmtNum(group.items.filter(item => item.type === "frame").length)} frames</span>
+        <span class="frames-group-actions"><button class="btn ghost sm" data-select-group="${escapeHtml(group.key)}">Select</button></span>
+      </div>`;
+    let openGrid = false;
+    const closeGrid = () => {
+      if (openGrid) {
+        html += `</div>`;
+        openGrid = false;
+      }
+    };
+    for (const item of group.items) {
+      if (item.type === "frame") {
+        if (!openGrid) {
+          html += `<div class="frames-browser-grid ${escapeHtml(framesState.density)}">`;
+          openGrid = true;
+        }
+        html += renderFrameTile(item.frame);
+      } else {
+        closeGrid();
+        html += renderGapCard(item.gap);
+      }
+    }
+    closeGrid();
+    return html;
+  }
+
+  function renderFrameTile(frame) {
+    const selected = framesState.selected.has(frame.cursor);
+    const stamp = frameStamp(frame);
+    return `
+      <button class="frame-browser-tile ${selected ? "selected" : ""}" data-frame-cursor="${escapeHtml(frame.cursor)}" type="button">
+        <img src="${escapeHtml(frame.url)}" alt="${escapeHtml(stamp)}" loading="lazy"/>
+        <span class="frame-check"></span>
+        <span class="frame-stamp">${escapeHtml(stamp)}</span>
+      </button>`;
+  }
+
+  function renderGapCard(gap) {
+    const height = Math.min(180, Math.max(54, Math.round(gap.duration_seconds / 45)));
+    return `
+      <div class="frames-gap-card" style="min-height:${height}px">
+        <div class="frames-gap-mark">!</div>
+        <div class="grow">
+          <div class="frames-gap-title">Capture gap · ${escapeHtml(formatDuration(gap.duration_seconds))}</div>
+          <div class="small">${escapeHtml(timeFromIso(gap.start))} → ${escapeHtml(timeFromIso(gap.end))} · no frames uploaded in this window</div>
         </div>
       </div>`;
+  }
+
+  function renderFrameScrubber() {
+    const density = root.querySelector("#frames-scrubber-density");
+    if (!density) return;
+    const counts = new Array(24).fill(0);
+    for (const frame of framesState.frames) counts[frameHour(frame)] += 1;
+    const max = Math.max(1, ...counts);
+    const bars = counts.map((count, hour) => {
+      if (!count) return "";
+      return `<span class="frames-scrubber-bar" style="left:${(hour / 24) * 100}%;width:${(100 / 24) - 0.2}%;height:${Math.max(10, (count / max) * 100)}%"></span>`;
+    }).join("");
+    const gaps = (framesState.daySummary?.gaps || []).map(gap => {
+      const start = minuteFromIso(gap.start);
+      const end = minuteFromIso(gap.end);
+      return `<span class="frames-scrubber-gap" style="left:${(start / 1440) * 100}%;width:${Math.max(0.3, ((end - start) / 1440) * 100)}%"></span>`;
+    }).join("");
+    density.innerHTML = bars + gaps;
+  }
+
+  function updateFrameScrubberWindow() {
+    const scroller = root.querySelector("#frames-grid-scroll");
+    const win = root.querySelector("#frames-scrubber-window");
+    if (!scroller || !win) return;
+    const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+    if (maxScroll <= 0) {
+      win.style.left = "0%";
+      win.style.width = "100%";
+      return;
+    }
+    const ratio = scroller.scrollTop / maxScroll;
+    const visibleRatio = Math.min(1, scroller.clientHeight / scroller.scrollHeight);
+    win.style.left = `${Math.min(100, ratio * 100)}%`;
+    win.style.width = `${Math.max(3, visibleRatio * 100)}%`;
+  }
+
+  function toggleFrameWarp() {
+    framesState.warping = !framesState.warping;
+    root.querySelector("#frames-scrubber")?.classList.toggle("warping", framesState.warping);
+    updateFrameToolbar();
+  }
+
+  function updateFrameWarpPreview(event) {
+    if (!framesState.warping || !framesState.frames.length) return;
+    const scrubber = root.querySelector("#frames-scrubber");
+    const cursor = root.querySelector("#frames-warp-cursor");
+    const preview = root.querySelector("#frames-warp-preview");
+    if (!scrubber || !cursor || !preview) return;
+    const rect = scrubber.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const frame = nearestFrameByMinute(ratio * 1440);
+    cursor.style.left = `${ratio * 100}%`;
+    preview.style.left = `${ratio * 100}%`;
+    if (frame) {
+      preview.innerHTML = `<img src="${escapeHtml(frame.url)}" alt="${escapeHtml(frameStamp(frame))}"/><div class="mono">${escapeHtml(frameStamp(frame))}</div>`;
+    }
+  }
+
+  function scrubFramesToEvent(event) {
+    const scrubber = root.querySelector("#frames-scrubber");
+    const scroller = root.querySelector("#frames-grid-scroll");
+    if (!scrubber || !scroller) return;
+    const rect = scrubber.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const hour = Math.floor(ratio * 24);
+    const group = [...root.querySelectorAll(".frames-group-head")]
+      .find(head => head.dataset.groupKey === String(hour));
+    if (group) group.scrollIntoView({ behavior: "smooth", block: "start" });
+    else scroller.scrollTo({ top: ratio * (scroller.scrollHeight - scroller.clientHeight), behavior: "smooth" });
+  }
+
+  function nearestFrameByMinute(minute) {
+    let nearest = null;
+    let best = Infinity;
+    for (const frame of framesState.frames) {
+      const distance = Math.abs(frameMinute(frame) - minute);
+      if (distance < best) {
+        best = distance;
+        nearest = frame;
+      }
+    }
+    return nearest;
+  }
+
+  function selectFrameFromEvent(event, cursor) {
+    const index = framesState.frames.findIndex(frame => frame.cursor === cursor);
+    if (index < 0) return;
+    if (event.shiftKey && framesState.lastSelectedCursor) {
+      const start = framesState.frames.findIndex(frame => frame.cursor === framesState.lastSelectedCursor);
+      if (start < 0) {
+        framesState.selected.clear();
+        framesState.selected.add(cursor);
+        framesState.lastSelectedCursor = cursor;
+        updateFrameSelectionUI();
+        return;
+      }
+      const a = Math.min(start, index);
+      const b = Math.max(start, index);
+      for (const frame of framesState.frames.slice(a, b + 1)) framesState.selected.add(frame.cursor);
+    } else if (event.metaKey || event.ctrlKey) {
+      if (framesState.selected.has(cursor)) framesState.selected.delete(cursor);
+      else framesState.selected.add(cursor);
+      framesState.lastSelectedCursor = cursor;
+    } else {
+      framesState.selected.clear();
+      framesState.selected.add(cursor);
+      framesState.lastSelectedCursor = cursor;
+    }
+    updateFrameSelectionUI();
+  }
+
+  function updateFrameSelectionUI() {
+    root.querySelectorAll(".frame-browser-tile").forEach(tile => {
+      tile.classList.toggle("selected", framesState.selected.has(tile.dataset.frameCursor));
+    });
+    const bar = root.querySelector("#frames-selection-bar");
+    const count = root.querySelector("#frames-selection-count");
+    const range = root.querySelector("#frames-selection-range");
+    if (!bar || !count || !range) return;
+    const selectedFrames = framesState.frames.filter(frame => framesState.selected.has(frame.cursor));
+    bar.classList.toggle("show", selectedFrames.length > 0);
+    count.textContent = String(selectedFrames.length);
+    if (selectedFrames.length) {
+      const first = selectedFrames[0];
+      const last = selectedFrames[selectedFrames.length - 1];
+      range.textContent = `${frameStamp(first)} → ${frameStamp(last)} · ${formatBytes(selectedFrames.reduce((sum, frame) => sum + (frame.size_bytes || 0), 0))}`;
+    } else {
+      range.textContent = "—";
+    }
+  }
+
+  function clearFrameSelection() {
+    framesState.selected.clear();
+    framesState.lastSelectedCursor = null;
+    updateFrameSelectionUI();
+  }
+
+  function startFrameMarquee(event) {
+    if (event.button !== 0 || event.target.closest(".frame-browser-tile, button, a, input, .frames-group-head, .frames-gap-card")) return;
+    frameMarquee = { startX: event.clientX, startY: event.clientY };
+    frameMarqueeMoved = false;
+    frameMarqueeBase = (event.shiftKey || event.metaKey || event.ctrlKey) ? new Set(framesState.selected) : new Set();
+    let marquee = document.getElementById("frames-marquee");
+    if (!marquee) {
+      marquee = document.createElement("div");
+      marquee.id = "frames-marquee";
+      marquee.className = "frames-marquee";
+      document.body.appendChild(marquee);
+    }
+    marquee.style.display = "block";
+    marquee.style.left = `${event.clientX}px`;
+    marquee.style.top = `${event.clientY}px`;
+    marquee.style.width = "0px";
+    marquee.style.height = "0px";
+    event.preventDefault();
+  }
+
+  function moveFrameMarquee(event) {
+    if (!frameMarquee) return;
+    const dx = Math.abs(event.clientX - frameMarquee.startX);
+    const dy = Math.abs(event.clientY - frameMarquee.startY);
+    if (!frameMarqueeMoved && dx + dy < 4) return;
+    frameMarqueeMoved = true;
+    const x1 = Math.min(frameMarquee.startX, event.clientX);
+    const y1 = Math.min(frameMarquee.startY, event.clientY);
+    const x2 = Math.max(frameMarquee.startX, event.clientX);
+    const y2 = Math.max(frameMarquee.startY, event.clientY);
+    const marquee = document.getElementById("frames-marquee");
+    if (marquee) {
+      marquee.style.left = `${x1}px`;
+      marquee.style.top = `${y1}px`;
+      marquee.style.width = `${x2 - x1}px`;
+      marquee.style.height = `${y2 - y1}px`;
+    }
+    const next = new Set(frameMarqueeBase || []);
+    root.querySelectorAll(".frame-browser-tile").forEach(tile => {
+      const rect = tile.getBoundingClientRect();
+      if (rect.right >= x1 && rect.left <= x2 && rect.bottom >= y1 && rect.top <= y2) {
+        next.add(tile.dataset.frameCursor);
+      }
+    });
+    framesState.selected = next;
+    updateFrameSelectionUI();
+  }
+
+  function endFrameMarquee() {
+    if (!frameMarquee) return;
+    const marquee = document.getElementById("frames-marquee");
+    if (marquee) marquee.style.display = "none";
+    if (!frameMarqueeMoved) clearFrameSelection();
+    frameMarquee = null;
+    frameMarqueeMoved = false;
+    frameMarqueeBase = null;
+  }
+
+  async function deleteSelectedFrames() {
+    const frames = framesState.frames.filter(frame => framesState.selected.has(frame.cursor));
+    if (!frames.length) return;
+    if (!confirm(`Delete ${frames.length} selected frame${frames.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    try {
+      for (const frame of frames) {
+        await api.fetchJson(`/api/cameras/${encId}/frames/${encodeURIComponent(frame.day)}/${encodeURIComponent(frame.filename)}`, { method: "DELETE" });
+      }
+      await loadFrameArchive({ keepDay: true });
+    } catch (e) {
+      alert(`Delete failed: ${e.message}`);
+    }
+  }
+
+  function openFrameLightbox(cursor) {
+    const index = framesState.frames.findIndex(frame => frame.cursor === cursor);
+    if (index < 0) return;
+    paintFrameLightbox(index);
+  }
+
+  function paintFrameLightbox(index) {
+    const frame = framesState.frames[index];
+    const box = root.querySelector("#frames-lightbox");
+    if (!frame || !box) return;
+    box.dataset.index = String(index);
+    box.classList.add("open");
+    box.setAttribute("aria-hidden", "false");
+    const nearby = framesState.frames.slice(Math.max(0, index - 8), index + 9);
+    box.innerHTML = `
+      <button class="frames-lb-close" type="button">ESC ${icon("x",12)}</button>
+      <button class="frames-lb-arrow prev" type="button">‹</button>
+      <img class="frames-lb-img" src="${escapeHtml(frame.url)}" alt="${escapeHtml(frameStamp(frame, true))}"/>
+      <button class="frames-lb-arrow next" type="button">›</button>
+      <div class="frames-lb-strip">
+        ${nearby.map(item => `<button class="frames-lb-thumb ${item.cursor === frame.cursor ? "active" : ""}" data-lb-cursor="${escapeHtml(item.cursor)}" type="button"><img src="${escapeHtml(item.url)}" alt="${escapeHtml(frameStamp(item))}"/></button>`).join("")}
+      </div>
+      <div class="frames-lb-meta">
+        <div>
+          <div class="frames-lb-title">${escapeHtml(frameStamp(frame, true))}</div>
+          <div class="small">${escapeHtml(frame.day)} · ${formatBytes(frame.size_bytes)} · frame ${index + 1} / ${framesState.frames.length}</div>
+        </div>
+        <div class="row">
+          <a class="btn sm" href="${escapeHtml(frame.url)}" download="${escapeHtml(frame.filename)}">${icon("download",12)}Download</a>
+          <a class="btn primary sm" href="${escapeHtml(frame.url)}" target="_blank" rel="noopener">${icon("ext",12)}Open</a>
+        </div>
+      </div>`;
+    box.querySelector(".frames-lb-close")?.addEventListener("click", closeFrameLightbox);
+    box.querySelector(".frames-lb-arrow.prev")?.addEventListener("click", () => navigateFrameLightbox(-1));
+    box.querySelector(".frames-lb-arrow.next")?.addEventListener("click", () => navigateFrameLightbox(1));
+    box.querySelectorAll("[data-lb-cursor]").forEach(button => button.addEventListener("click", () => openFrameLightbox(button.dataset.lbCursor)));
+  }
+
+  function closeFrameLightbox() {
+    const box = root.querySelector("#frames-lightbox");
+    if (!box) return;
+    box.classList.remove("open");
+    box.setAttribute("aria-hidden", "true");
+    box.innerHTML = "";
+  }
+
+  function navigateFrameLightbox(delta) {
+    const box = root.querySelector("#frames-lightbox");
+    const index = Number(box?.dataset.index || 0);
+    const next = Math.max(0, Math.min(framesState.frames.length - 1, index + delta));
+    paintFrameLightbox(next);
+  }
+
+  function handleFrameKeyboard(event) {
+    if (tab !== "frames") return;
+    const tag = event.target?.tagName || "";
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+    const lightbox = root.querySelector("#frames-lightbox.open");
+    if (lightbox) {
+      if (event.key === "Escape") closeFrameLightbox();
+      if (event.key === "ArrowLeft") navigateFrameLightbox(-1);
+      if (event.key === "ArrowRight") navigateFrameLightbox(1);
+      return;
+    }
+    if (event.key === "Escape") {
+      clearFrameSelection();
+      return;
+    }
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      scrubFrameKeyboard(event.key === "ArrowLeft" ? -1 : 1, event.shiftKey);
+    }
+  }
+
+  function scrubFrameKeyboard(direction, big) {
+    const scroller = root.querySelector("#frames-grid-scroll");
+    if (!scroller) return;
+    if (big) {
+      scroller.scrollBy({ top: direction * scroller.clientHeight * 0.9, behavior: "smooth" });
+      return;
+    }
+    const heads = [...root.querySelectorAll(".frames-group-head")];
+    if (!heads.length) return;
+    const top = scroller.getBoundingClientRect().top;
+    let current = 0;
+    for (let i = 0; i < heads.length; i++) {
+      if (heads[i].getBoundingClientRect().top - top <= 4) current = i;
+      else break;
+    }
+    const next = Math.max(0, Math.min(heads.length - 1, current + direction));
+    heads[next].scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function frameGroupKey(frame) {
+    if (framesState.groupBy === "day") return framesState.activeDay;
+    if (framesState.groupBy === "week") return "week";
+    return String(frameHour(frame));
+  }
+
+  function frameGroupLabel(frame) {
+    if (framesState.groupBy === "day") return formatDayTitle(framesState.activeDay);
+    if (framesState.groupBy === "week") return `Week of ${formatDayShort(framesState.activeDay)}`;
+    return `${String(frameHour(frame)).padStart(2, "0")}:00`;
+  }
+
+  function frameHour(frame) {
+    return Math.floor(frameMinute(frame) / 60);
+  }
+
+  function frameMinute(frame) {
+    const time = (frame.captured_at || "").split("T")[1] || "";
+    const hour = Number(time.slice(0, 2));
+    const minute = Number(time.slice(3, 5));
+    if (Number.isFinite(hour) && Number.isFinite(minute)) return hour * 60 + minute;
+    return 0;
+  }
+
+  function minuteFromIso(value) {
+    const time = (value || "").split("T")[1] || "";
+    const hour = Number(time.slice(0, 2));
+    const minute = Number(time.slice(3, 5));
+    if (Number.isFinite(hour) && Number.isFinite(minute)) return hour * 60 + minute;
+    return 0;
+  }
+
+  function frameStamp(frame, includeDate = false) {
+    if (!frame?.captured_at) return frame?.filename || "—";
+    const text = frame.captured_at.replace("T", " ");
+    return includeDate ? text : text.slice(11, 16);
+  }
+
+  function timeFromIso(value) {
+    return (value || "").split("T")[1]?.slice(0, 5) || "—";
+  }
+
+  function formatDayShort(day) {
+    const date = new Date(`${day}T00:00:00`);
+    return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  function formatDayTitle(day) {
+    const date = new Date(`${day}T00:00:00`);
+    return date.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  }
+
+  function formatMonthLabel(month) {
+    const date = new Date(`${month}-01T00:00:00`);
+    return date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  }
+
+  function formatDayRange(summary) {
+    if (!summary?.first_captured_at || !summary?.last_captured_at) return "—";
+    return `${timeFromIso(summary.first_captured_at)} → ${timeFromIso(summary.last_captured_at)}`;
+  }
+
+  function formatDuration(seconds) {
+    if (seconds < 60) return `${seconds}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.round((seconds % 3600) / 60);
+    return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
   }
 
   function renderScheduleTab() {
@@ -599,7 +1363,13 @@ async function renderCamera(root, hash) {
 
   await load();
   pollTimer = window.setInterval(load, 15000);
-  return () => { if (pollTimer) window.clearInterval(pollTimer); };
+  return () => {
+    if (pollTimer) window.clearInterval(pollTimer);
+    framesState.mounted = false;
+    removeFrameGlobalListeners();
+    const marquee = document.getElementById("frames-marquee");
+    if (marquee) marquee.remove();
+  };
 }
 
 registerView("#/cameras/", renderCamera);
