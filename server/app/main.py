@@ -9,13 +9,22 @@ import shutil
 import socket
 import subprocess
 import tempfile
-from ipaddress import ip_address, ip_network
 from datetime import datetime, timezone
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
-from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -24,7 +33,6 @@ from app.agents import AgentStore, PendingAgent
 from app.provision_script import build_install_script
 from app.ssh_keys import generate_keypair, read_public_key
 from app.ssh_provision import ProvisionError, resolve_target, run_provision
-
 
 app = FastAPI(title="Hydroponic Timelapse Server")
 
@@ -36,17 +44,13 @@ VALID_CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 VALID_FRAME_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 VALID_FRAME_FILENAME_RE = re.compile(r"^\d{8}T\d{6}Z?(?:-\d+)?\.jpg$")
 DEFAULT_ALLOWED_NETWORKS = (
-    "127.0.0.0/8,"
-    "10.0.0.0/8,"
-    "172.16.0.0/12,"
-    "192.168.0.0/16,"
-    "::1/128,"
-    "fc00::/7,"
-    "fe80::/10"
+    "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7,fe80::/10"
 )
 ALLOWED_NETWORKS = [
     ip_network(value.strip())
-    for value in os.environ.get("TIMELAPSE_ALLOWED_NETWORKS", DEFAULT_ALLOWED_NETWORKS).split(",")
+    for value in os.environ.get(
+        "TIMELAPSE_ALLOWED_NETWORKS", DEFAULT_ALLOWED_NETWORKS
+    ).split(",")
     if value.strip()
 ]
 
@@ -145,7 +149,9 @@ class CameraConfig(BaseModel):
         seen = set()
         for hour in value:
             if not isinstance(hour, int) or isinstance(hour, bool):
-                raise ValueError(f"capture_hours entries must be ints 0-23, got {hour!r}")
+                raise ValueError(
+                    f"capture_hours entries must be ints 0-23, got {hour!r}"
+                )
             if hour < 0 or hour > 23:
                 raise ValueError(f"capture_hours entries must be 0-23, got {hour}")
             if hour in seen:
@@ -177,9 +183,13 @@ class CameraConfig(BaseModel):
         seen = set()
         for day in value:
             if not isinstance(day, int) or isinstance(day, bool):
-                raise ValueError(f"schedule_days entries must be ISO weekdays 1-7, got {day!r}")
+                raise ValueError(
+                    f"schedule_days entries must be ISO weekdays 1-7, got {day!r}"
+                )
             if day < 1 or day > 7:
-                raise ValueError(f"schedule_days entries must be 1 (Mon) - 7 (Sun), got {day}")
+                raise ValueError(
+                    f"schedule_days entries must be 1 (Mon) - 7 (Sun), got {day}"
+                )
             if day in seen:
                 raise ValueError(f"schedule_days has duplicate {day}")
             seen.add(day)
@@ -189,7 +199,9 @@ class CameraConfig(BaseModel):
     def _enforce_mode_invariants(self):
         if self.schedule_mode == "hours":
             if not self.capture_hours:
-                raise ValueError("schedule_mode='hours' requires non-empty capture_hours")
+                raise ValueError(
+                    "schedule_mode='hours' requires non-empty capture_hours"
+                )
         elif self.schedule_mode == "daylight":
             # daylight derives hours per-day from sunrise/sunset; explicit hours are dropped
             self.capture_hours = None
@@ -534,8 +546,10 @@ def list_camera_images(camera_id: str) -> List[Path]:
 
 def list_valid_camera_frames(camera_id: str) -> List[Path]:
     return [
-        path for path in list_camera_images(camera_id)
-        if VALID_FRAME_DAY_RE.match(path.parent.name) and VALID_FRAME_FILENAME_RE.match(path.name)
+        path
+        for path in list_camera_images(camera_id)
+        if VALID_FRAME_DAY_RE.match(path.parent.name)
+        and VALID_FRAME_FILENAME_RE.match(path.name)
     ]
 
 
@@ -579,7 +593,9 @@ def frame_to_response(camera_id: str, path: Path) -> Dict[str, Any]:
         "filename": filename,
         "cursor": frame_key(path),
         "captured_at": parse_frame_timestamp(path),
-        "stored_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+        "stored_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "size_bytes": stat.st_size,
         "url": f"/api/cameras/{camera_id}/frames/{day}/{filename}",
         "thumbnail_url": f"/api/cameras/{camera_id}/frames/{day}/{filename}/thumbnail",
@@ -612,11 +628,19 @@ def ensure_frame_thumbnail(source: Path, thumbnail: Path) -> bool:
     temp_path = thumbnail.with_name(f".{thumbnail.name}.tmp.jpg")
     temp_path.unlink(missing_ok=True)
     command = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(source),
-        "-vf", "scale=w=320:h=320:force_original_aspect_ratio=decrease",
-        "-frames:v", "1",
-        "-q:v", "5",
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-vf",
+        "scale=w=320:h=320:force_original_aspect_ratio=decrease",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "5",
         str(temp_path),
     ]
     try:
@@ -653,7 +677,9 @@ def frame_gap_threshold_seconds(camera_id: str) -> int:
     return max(interval * 2, 120)
 
 
-def frame_gap_responses(paths: List[Path], threshold_seconds: int) -> List[Dict[str, Any]]:
+def frame_gap_responses(
+    paths: List[Path], threshold_seconds: int
+) -> List[Dict[str, Any]]:
     gaps = []
     previous_dt: Optional[datetime] = None
     previous_path: Optional[Path] = None
@@ -664,13 +690,15 @@ def frame_gap_responses(paths: List[Path], threshold_seconds: int) -> List[Dict[
         if previous_dt is not None and previous_path is not None:
             delta = int((captured - previous_dt).total_seconds())
             if delta > threshold_seconds:
-                gaps.append({
-                    "after": frame_key(previous_path),
-                    "before": frame_key(path),
-                    "start": previous_dt.isoformat(),
-                    "end": captured.isoformat(),
-                    "duration_seconds": delta,
-                })
+                gaps.append(
+                    {
+                        "after": frame_key(previous_path),
+                        "before": frame_key(path),
+                        "start": previous_dt.isoformat(),
+                        "end": captured.isoformat(),
+                        "duration_seconds": delta,
+                    }
+                )
         previous_dt = captured
         previous_path = path
     return gaps
@@ -704,7 +732,7 @@ def frame_day_response(camera_id: str, day: str, paths: List[Path]) -> Dict[str,
     }
 
 
-ONLINE_GRACE_SECONDS = 300
+ONLINE_GRACE_SECONDS = 180
 
 
 def is_camera_online(status: Dict[str, Any], poll_seconds: int = 60) -> bool:
@@ -783,7 +811,9 @@ def agent_store() -> AgentStore:
     return AgentStore(DATA_DIR)
 
 
-def agent_to_response(agent: PendingAgent, include_public_key: bool = False) -> Dict[str, Any]:
+def agent_to_response(
+    agent: PendingAgent, include_public_key: bool = False
+) -> Dict[str, Any]:
     body = {
         "agent_id": agent.agent_id,
         "display_name": agent.display_name,
@@ -844,7 +874,9 @@ def read_agent(agent_id: str) -> Dict[str, Any]:
 
 
 @app.post("/api/agents/{agent_id}/provision")
-def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) -> Dict[str, Any]:
+def provision_agent(
+    agent_id: str, payload: ProvisionRequest, request: Request
+) -> Dict[str, Any]:
     agent_id = safe_identifier(agent_id)
     store = agent_store()
     try:
@@ -866,7 +898,9 @@ def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) 
 
     try:
         target = resolve_target(agent.expected_hostname, agent.ip_fallback)
-        agent_version = (REPO_ROOT / "agent" / "VERSION").read_text(encoding="utf-8").strip()
+        agent_version = (
+            (REPO_ROOT / "agent" / "VERSION").read_text(encoding="utf-8").strip()
+        )
         install_script = build_install_script(
             camera_id=agent_id,
             server_url=server_url,
@@ -876,7 +910,10 @@ def provision_agent(agent_id: str, payload: ProvisionRequest, request: Request) 
         )
         payload_files = {
             "timelapse_agent.py": REPO_ROOT / "agent" / "timelapse_agent.py",
-            "timelapse-agent.service": REPO_ROOT / "agent" / "systemd" / "timelapse-agent.service",
+            "timelapse-agent.service": REPO_ROOT
+            / "agent"
+            / "systemd"
+            / "timelapse-agent.service",
         }
         run_provision(
             target=target,
@@ -970,6 +1007,7 @@ def post_checkin(
         agent = None
     if agent is not None and agent.status == "provisioned":
         from app.agents import KeyArchive
+
         KeyArchive(DATA_DIR).archive_private_key(camera_id)
 
     return {"acknowledged": True, "last_seen": now_iso}
@@ -1016,10 +1054,14 @@ def get_update_manifest(camera_id: str, request: Request) -> Dict[str, Any]:
     config = get_camera_config(camera_id)
     desired = config.desired_agent_version
     if not desired:
-        raise HTTPException(status_code=404, detail="No desired agent version configured")
+        raise HTTPException(
+            status_code=404, detail="No desired agent version configured"
+        )
     bundle, sha = release_paths(desired)
     if not bundle.exists() or not sha.exists():
-        raise HTTPException(status_code=503, detail=f"Release {desired} not staged on server")
+        raise HTTPException(
+            status_code=503, detail=f"Release {desired} not staged on server"
+        )
     base_url = resolve_public_server_url(str(request.base_url).rstrip("/"))
     return {
         "version": desired,
@@ -1105,8 +1147,7 @@ def list_frame_days(camera_id: str) -> Dict[str, Any]:
         month_record["gap_count"] += day["gap_count"]
 
     months = [
-        month_totals[month]
-        for month in sorted(month_totals.keys(), reverse=True)
+        month_totals[month] for month in sorted(month_totals.keys(), reverse=True)
     ]
     return {
         "days": days,
@@ -1131,7 +1172,9 @@ def list_frames(
         try:
             before_day, before_filename = before.split("/", 1)
         except ValueError as error:
-            raise HTTPException(status_code=400, detail="Invalid frame cursor") from error
+            raise HTTPException(
+                status_code=400, detail="Invalid frame cursor"
+            ) from error
         validate_frame_day(before_day)
         validate_frame_filename(before_filename)
 
@@ -1226,7 +1269,9 @@ async def generate_video(
         try:
             requested_name = safe_identifier(request.name)
         except HTTPException as error:
-            raise HTTPException(status_code=400, detail=f"Invalid video name: {error.detail}") from error
+            raise HTTPException(
+                status_code=400, detail=f"Invalid video name: {error.detail}"
+            ) from error
     else:
         requested_name = f"timelapse-{timestamp}"
 
@@ -1242,11 +1287,25 @@ async def generate_video(
         try:
             if request.format == "mp4":
                 command = [
-                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                    "-f", "concat", "-safe", "0", "-i", str(list_path),
-                    "-vf", f"fps={request.fps},format=yuv420p",
-                    "-c:v", "libx264", "-movflags", "+faststart",
-                    "-progress", "pipe:1",
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(list_path),
+                    "-vf",
+                    f"fps={request.fps},format=yuv420p",
+                    "-c:v",
+                    "libx264",
+                    "-movflags",
+                    "+faststart",
+                    "-progress",
+                    "pipe:1",
                     str(output_path),
                 ]
                 process = await asyncio.create_subprocess_exec(
@@ -1274,13 +1333,21 @@ async def generate_video(
                             except ValueError:
                                 continue
                         elif key == "progress":
-                            percent = min(100, round(last_frame / total_frames * 100)) if total_frames else 0
+                            percent = (
+                                min(100, round(last_frame / total_frames * 100))
+                                if total_frames
+                                else 0
+                            )
                             yield f"event: progress\ndata: {json.dumps({'frame': last_frame, 'total': total_frames, 'percent': percent})}\n\n"
                             if value == "end":
                                 break
                     return_code = await process.wait()
                     if return_code != 0:
-                        stderr = (await process.stderr.read()).decode("utf-8", errors="replace").strip()
+                        stderr = (
+                            (await process.stderr.read())
+                            .decode("utf-8", errors="replace")
+                            .strip()
+                        )
                         yield f"event: error\ndata: {json.dumps({'detail': stderr or 'ffmpeg failed'})}\n\n"
                         return
                 finally:
@@ -1291,8 +1358,13 @@ async def generate_video(
                 loop = asyncio.get_running_loop()
                 try:
                     await loop.run_in_executor(
-                        None, run_ffmpeg_gif,
-                        list_path, output_path, request.fps, video_dir, requested_name,
+                        None,
+                        run_ffmpeg_gif,
+                        list_path,
+                        output_path,
+                        request.fps,
+                        video_dir,
+                        requested_name,
                     )
                 except HTTPException as exc:
                     yield f"event: error\ndata: {json.dumps({'detail': exc.detail})}\n\n"
@@ -1307,10 +1379,23 @@ async def generate_video(
 
 def run_ffmpeg_mp4(list_path: Path, output_path: Path, fps: int) -> None:
     command = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "concat", "-safe", "0", "-i", str(list_path),
-        "-vf", f"fps={fps},format=yuv420p",
-        "-c:v", "libx264", "-movflags", "+faststart",
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-vf",
+        f"fps={fps},format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-movflags",
+        "+faststart",
         str(output_path),
     ]
     try:
@@ -1319,19 +1404,42 @@ def run_ffmpeg_mp4(list_path: Path, output_path: Path, fps: int) -> None:
         raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
 
 
-def run_ffmpeg_gif(list_path: Path, output_path: Path, fps: int, work_dir: Path, base_name: str) -> None:
+def run_ffmpeg_gif(
+    list_path: Path, output_path: Path, fps: int, work_dir: Path, base_name: str
+) -> None:
     palette_path = work_dir / f"{base_name}-palette.png"
     palette_command = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "concat", "-safe", "0", "-i", str(list_path),
-        "-vf", f"fps={fps},scale=720:-1:flags=lanczos,palettegen",
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-vf",
+        f"fps={fps},scale=720:-1:flags=lanczos,palettegen",
         str(palette_path),
     ]
     encode_command = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "concat", "-safe", "0", "-i", str(list_path),
-        "-i", str(palette_path),
-        "-filter_complex", f"fps={fps},scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse",
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-i",
+        str(palette_path),
+        "-filter_complex",
+        f"fps={fps},scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse",
         str(output_path),
     ]
     try:
@@ -1363,12 +1471,16 @@ def list_videos(camera_id: str) -> Dict[str, Any]:
             stat = entry.stat()
         except OSError:
             continue
-        items.append({
-            "filename": entry.name,
-            "size_bytes": stat.st_size,
-            "format": suffix.lstrip("."),
-            "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
-        })
+        items.append(
+            {
+                "filename": entry.name,
+                "size_bytes": stat.st_size,
+                "format": suffix.lstrip("."),
+                "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+        )
     items.sort(key=lambda v: v["created_at"], reverse=True)
     return {"videos": items}
 
