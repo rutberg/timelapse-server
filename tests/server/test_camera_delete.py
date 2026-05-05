@@ -19,6 +19,17 @@ def test_delete_removes_image_directory(client, tmp_data_dir):
     assert not (tmp_data_dir / "images" / "cam-imgs").exists()
 
 
+def test_delete_removes_thumbnail_directory(client, tmp_data_dir):
+    thumb_dir = tmp_data_dir / "thumbnails" / "cam-thumbs" / "2026-05-04"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    (thumb_dir / "1.jpg").write_bytes(b"thumb")
+
+    response = client.delete("/api/cameras/cam-thumbs")
+
+    assert response.status_code == 204
+    assert not (tmp_data_dir / "thumbnails" / "cam-thumbs").exists()
+
+
 def test_delete_unknown_camera_returns_204(client, tmp_data_dir):
     """Idempotent: deleting a never-existed camera is a no-op success."""
     response = client.delete("/api/cameras/cam-ghost")

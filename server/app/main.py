@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -365,6 +366,7 @@ def safe_identifier(value: str) -> str:
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "images").mkdir(exist_ok=True)
+    (DATA_DIR / "thumbnails").mkdir(exist_ok=True)
     (DATA_DIR / "videos").mkdir(exist_ok=True)
 
 
@@ -383,7 +385,11 @@ def directory_size_bytes(path: Path) -> int:
 
 def compute_stats() -> Dict[str, int]:
     """Storage usage and capacity for the data directory's filesystem."""
-    used = directory_size_bytes(DATA_DIR / "images") + directory_size_bytes(DATA_DIR / "videos")
+    used = (
+        directory_size_bytes(DATA_DIR / "images")
+        + directory_size_bytes(DATA_DIR / "thumbnails")
+        + directory_size_bytes(DATA_DIR / "videos")
+    )
     try:
         usage = shutil.disk_usage(str(DATA_DIR))
         capacity = usage.total
@@ -573,7 +579,67 @@ def frame_to_response(camera_id: str, path: Path) -> Dict[str, Any]:
         "stored_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
         "size_bytes": stat.st_size,
         "url": f"/api/cameras/{camera_id}/frames/{day}/{filename}",
+        "thumbnail_url": f"/api/cameras/{camera_id}/frames/{day}/{filename}/thumbnail",
     }
+
+
+def thumbnail_path(camera_id: str, day: str, filename: str) -> Path:
+    return DATA_DIR / "thumbnails" / camera_id / day / filename
+
+
+def thumbnail_current(source: Path, thumbnail: Path) -> bool:
+    try:
+        return (
+            thumbnail.exists()
+            and thumbnail.is_file()
+            and thumbnail.stat().st_size > 0
+            and thumbnail.stat().st_mtime >= source.stat().st_mtime
+        )
+    except OSError:
+        return False
+
+
+def ensure_frame_thumbnail(source: Path, thumbnail: Path) -> bool:
+    if thumbnail_current(source, thumbnail):
+        return True
+    if not shutil.which("ffmpeg"):
+        return False
+
+    thumbnail.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = thumbnail.with_name(f".{thumbnail.name}.tmp.jpg")
+    temp_path.unlink(missing_ok=True)
+    command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(source),
+        "-vf", "scale=w=320:h=320:force_original_aspect_ratio=decrease",
+        "-frames:v", "1",
+        "-q:v", "5",
+        str(temp_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+        if not temp_path.exists() or temp_path.stat().st_size == 0:
+            return False
+        temp_path.replace(thumbnail)
+        return True
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        logging.warning("Thumbnail generation failed for %s: %s", source, error)
+        return False
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def delete_frame_thumbnail(camera_id: str, day: str, filename: str) -> None:
+    path = thumbnail_path(camera_id, day, filename)
+    path.unlink(missing_ok=True)
+    thumbnails_root = DATA_DIR / "thumbnails" / camera_id
+    for directory in (path.parent, path.parent.parent):
+        if directory == thumbnails_root.parent:
+            break
+        try:
+            directory.rmdir()
+        except OSError:
+            break
 
 
 def frame_gap_threshold_seconds(camera_id: str) -> int:
@@ -923,7 +989,7 @@ def delete_camera(camera_id: str) -> None:
     if agent_dir.exists():
         shutil.rmtree(agent_dir, ignore_errors=True)
 
-    for sub in ("images", "videos"):
+    for sub in ("images", "thumbnails", "videos"):
         path = DATA_DIR / sub / camera_id
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)
@@ -987,6 +1053,12 @@ async def upload_image(
 
     with destination.open("wb") as output_file:
         shutil.copyfileobj(image.file, output_file)
+
+    await asyncio.to_thread(
+        ensure_frame_thumbnail,
+        destination,
+        thumbnail_path(camera_id, destination.parent.name, destination.name),
+    )
 
     return {
         "stored": True,
@@ -1093,6 +1165,25 @@ def read_frame(
     return FileResponse(path, media_type="image/jpeg", filename=filename)
 
 
+@app.get("/api/cameras/{camera_id}/frames/{day}/{filename}/thumbnail")
+def read_frame_thumbnail(
+    camera_id: str,
+    day: str,
+    filename: str,
+) -> FileResponse:
+    camera_id = safe_identifier(camera_id)
+    day = validate_frame_day(day)
+    filename = validate_frame_filename(filename)
+    source = DATA_DIR / "images" / camera_id / day / filename
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="Frame not found")
+
+    thumbnail = thumbnail_path(camera_id, day, filename)
+    if ensure_frame_thumbnail(source, thumbnail):
+        return FileResponse(thumbnail, media_type="image/jpeg")
+    return FileResponse(source, media_type="image/jpeg")
+
+
 @app.delete("/api/cameras/{camera_id}/frames/{day}/{filename}", status_code=204)
 def delete_frame(
     camera_id: str,
@@ -1106,6 +1197,7 @@ def delete_frame(
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Frame not found")
     path.unlink(missing_ok=True)
+    delete_frame_thumbnail(camera_id, day, filename)
     return None
 
 
