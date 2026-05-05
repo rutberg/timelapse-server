@@ -332,3 +332,107 @@ class TestCaptureFrameGphoto2Branch:
         with patch("timelapse_agent.resolve_active_backend", return_value=None):
             with pytest.raises(RuntimeError, match="No camera backend"):
                 capture_frame(tmp_path, {"camera_backend": "auto"})
+
+
+from timelapse_agent import (
+    AgentState,
+    upload_pending,
+    upload_camera_pending,
+    measure_camera_pending,
+)
+
+
+class TestUploadCameraPending:
+    def test_uploads_each_entry_then_clears_state_and_camera(self, tmp_path, monkeypatch):
+        # Two queued items.
+        save_camera_pending(tmp_path, [
+            {"folder": "/a", "filename": "IMG_1.CR3", "captured_at": "2026-05-05T10:00:00-07:00"},
+            {"folder": "/a", "filename": "IMG_2.CR3", "captured_at": "2026-05-05T10:01:00-07:00"},
+        ])
+        download_calls = []
+        delete_calls = []
+        post_calls = []
+
+        def fake_download(ref, dest):
+            download_calls.append((ref, dest))
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"fake")
+            return dest
+
+        def fake_delete(ref):
+            delete_calls.append(ref)
+
+        def fake_post(url, file_path, captured_at, timeout=60):
+            post_calls.append((url, file_path.name, captured_at))
+            return {"ok": True}
+
+        monkeypatch.setattr("timelapse_agent.gphoto2_download_file", fake_download)
+        monkeypatch.setattr("timelapse_agent.gphoto2_delete_file", fake_delete)
+        monkeypatch.setattr("timelapse_agent.post_multipart", fake_post)
+
+        settings = {"server_url": "http://srv", "camera_id": "cam1"}
+        state = AgentState()
+        upload_camera_pending(settings, tmp_path, state)
+
+        assert len(post_calls) == 2
+        assert len(delete_calls) == 2
+        # State is empty.
+        assert load_camera_pending(tmp_path) == []
+        assert state.last_error is None
+
+    def test_keeps_entry_when_upload_fails(self, tmp_path, monkeypatch):
+        from urllib.error import HTTPError
+        save_camera_pending(tmp_path, [
+            {"folder": "/a", "filename": "IMG_1.CR3", "captured_at": "t1"},
+        ])
+        def fake_download(ref, dest):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"x")
+            return dest
+        monkeypatch.setattr("timelapse_agent.gphoto2_download_file", fake_download)
+        deleted = []
+        monkeypatch.setattr("timelapse_agent.gphoto2_delete_file",
+                            lambda ref: deleted.append(ref))
+        def boom(*a, **kw):
+            raise HTTPError("u", 500, "boom", {}, None)
+        monkeypatch.setattr("timelapse_agent.post_multipart", boom)
+
+        state = AgentState()
+        upload_camera_pending({"server_url": "http://x", "camera_id": "c"}, tmp_path, state)
+
+        # Entry survives, camera file not deleted, error recorded.
+        assert len(load_camera_pending(tmp_path)) == 1
+        assert deleted == []
+        assert state.last_error is not None
+
+    def test_drops_entry_when_camera_says_file_missing(self, tmp_path, monkeypatch):
+        # If the file vanished from the camera (user wiped SD, etc.), drop the
+        # state entry instead of looping forever on a doomed download.
+        save_camera_pending(tmp_path, [
+            {"folder": "/a", "filename": "GONE.CR3", "captured_at": "t1"},
+        ])
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd="gphoto2",
+            stderr="ERROR: Could not find file '/a/GONE.CR3'.\n",
+        )
+        def fake_download(ref, dest):
+            raise err
+        monkeypatch.setattr("timelapse_agent.gphoto2_download_file", fake_download)
+
+        state = AgentState()
+        upload_camera_pending({"server_url": "http://x", "camera_id": "c"}, tmp_path, state)
+
+        assert load_camera_pending(tmp_path) == []
+
+
+class TestMeasureCameraPending:
+    def test_zero_when_no_state_file(self, tmp_path):
+        assert measure_camera_pending(tmp_path) == 0
+
+    def test_counts_entries(self, tmp_path):
+        save_camera_pending(tmp_path, [
+            {"folder": "/a", "filename": "X.CR3", "captured_at": "t1"},
+            {"folder": "/a", "filename": "Y.CR3", "captured_at": "t2"},
+            {"folder": "/a", "filename": "Z.CR3", "captured_at": "t3"},
+        ])
+        assert measure_camera_pending(tmp_path) == 3

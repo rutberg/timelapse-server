@@ -685,6 +685,64 @@ def gphoto2_delete_file(ref: CameraFileRef, timeout: int = 30) -> None:
         raise
 
 
+def measure_camera_pending(work_dir: Path) -> int:
+    """Number of images queued on the camera awaiting upload."""
+    return len(load_camera_pending(work_dir))
+
+
+def upload_camera_pending(
+    settings: Dict[str, Any], work_dir: Path, state: AgentState
+) -> None:
+    """For gphoto2 backend: stream each pending camera file → server → delete from camera."""
+    entries = load_camera_pending(work_dir)
+    if not entries:
+        return
+
+    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/upload"
+    GPHOTO2_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    for entry in list(entries):
+        ref = CameraFileRef(folder=entry["folder"], filename=entry["filename"])
+        captured_at = entry.get("captured_at") or now_local_iso()
+        stage_path = GPHOTO2_STAGE_DIR / ref.filename
+
+        try:
+            gphoto2_download_file(ref, stage_path)
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").lower()
+            if "could not find" in stderr or "file not found" in stderr:
+                logging.warning(
+                    "Camera file missing, dropping queue entry: %s/%s",
+                    ref.folder, ref.filename,
+                )
+                remove_camera_pending(work_dir, ref)
+                continue
+            logging.warning("Download failed for %s: %s", ref.filename, error)
+            state.last_error = f"download failed: {error}"
+            return
+
+        try:
+            post_multipart(url, stage_path, captured_at)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+            logging.warning("Upload failed for %s: %s", ref.filename, error)
+            state.last_error = f"upload failed: {error}"
+            stage_path.unlink(missing_ok=True)
+            return
+
+        stage_path.unlink(missing_ok=True)
+        try:
+            gphoto2_delete_file(ref)
+        except subprocess.CalledProcessError as error:
+            # Upload succeeded but camera delete failed; keep going so we don't
+            # re-upload, but flag it.
+            logging.warning("Camera delete failed for %s: %s", ref.filename, error)
+            state.last_error = f"camera delete failed: {error}"
+        remove_camera_pending(work_dir, ref)
+        state.last_upload_at = now_local_iso()
+        state.last_error = None
+        logging.info("Uploaded (camera) %s", ref.filename)
+
+
 def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
     quality = str(config.get("jpeg_quality", DEFAULT_REMOTE_CONFIG["jpeg_quality"]))
 
@@ -823,6 +881,8 @@ def fetch_remote_config(settings: Dict[str, Any], cache_path: Path) -> Dict[str,
 
 
 def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) -> None:
+    """Drain both the local pending/ directory (rpicam path) and the camera-
+    resident pending queue (gphoto2 path). Either may be empty."""
     pending_dir = work_dir / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/upload"
@@ -844,6 +904,8 @@ def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) 
         state.last_upload_at = now_local_iso()
         state.last_error = None
         logging.info("Uploaded %s", image_path.name)
+
+    upload_camera_pending(settings, work_dir, state)
 
 
 def next_due_time(last_capture: Optional[float], interval_seconds: int, now: float) -> float:
@@ -870,6 +932,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
         AGENT_VERSION, settings["camera_id"], max_pending_bytes,
     )
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
+    state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
     state.local_hour = startup_now.hour
     startup_schedule_mode = remote_config.get("schedule_mode")
@@ -897,6 +960,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
             state.pending_count, state.pending_bytes = measure_pending(work_dir)
+            state.pending_count += measure_camera_pending(work_dir)
             post_checkin(settings, state)
             if check_for_update(settings):
                 logging.info("Exiting to allow systemd restart")
@@ -905,6 +969,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
 
         upload_pending(settings, work_dir, state)
         state.pending_count, state.pending_bytes = measure_pending(work_dir)
+        state.pending_count += measure_camera_pending(work_dir)
 
         enabled = bool(remote_config.get("enabled", True))
         interval_seconds = int(remote_config.get("interval_seconds", 900))
@@ -975,6 +1040,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                     )
                 upload_pending(settings, work_dir, state)
                 state.pending_count, state.pending_bytes = measure_pending(work_dir)
+                state.pending_count += measure_camera_pending(work_dir)
                 next_capture = last_capture + interval_seconds
 
         sleep_until = min(next_capture, next_config_poll)
