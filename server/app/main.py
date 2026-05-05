@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
-from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -32,6 +32,8 @@ DATA_DIR = Path(os.environ.get("TIMELAPSE_DATA_DIR", "./data")).resolve()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STORE_PATH = DATA_DIR / "config.json"
 VALID_CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
+VALID_FRAME_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+VALID_FRAME_FILENAME_RE = re.compile(r"^\d{8}T\d{6}Z?(?:-\d+)?\.jpg$")
 DEFAULT_ALLOWED_NETWORKS = (
     "127.0.0.0/8,"
     "10.0.0.0/8,"
@@ -475,6 +477,118 @@ def list_camera_images(camera_id: str) -> List[Path]:
     return sorted(base.glob("*/*.jpg"))
 
 
+def list_valid_camera_frames(camera_id: str) -> List[Path]:
+    return [
+        path for path in list_camera_images(camera_id)
+        if VALID_FRAME_DAY_RE.match(path.parent.name) and VALID_FRAME_FILENAME_RE.match(path.name)
+    ]
+
+
+def frame_key(path: Path) -> str:
+    return f"{path.parent.name}/{path.name}"
+
+
+def validate_frame_day(value: str) -> str:
+    if not VALID_FRAME_DAY_RE.match(value):
+        raise HTTPException(status_code=400, detail="Invalid frame day")
+    return value
+
+
+def validate_frame_filename(value: str) -> str:
+    if not VALID_FRAME_FILENAME_RE.match(value):
+        raise HTTPException(status_code=400, detail="Invalid frame filename")
+    return value
+
+
+def parse_frame_datetime(path: Path) -> Optional[datetime]:
+    timestamp = path.stem.split("-", 1)[0].removesuffix("Z")
+    try:
+        return datetime.strptime(timestamp, "%Y%m%dT%H%M%S")
+    except ValueError:
+        return None
+
+
+def parse_frame_timestamp(path: Path) -> Optional[str]:
+    captured = parse_frame_datetime(path)
+    if captured is None:
+        return None
+    return captured.isoformat()
+
+
+def frame_to_response(camera_id: str, path: Path) -> Dict[str, Any]:
+    stat = path.stat()
+    day = path.parent.name
+    filename = path.name
+    return {
+        "day": day,
+        "filename": filename,
+        "cursor": frame_key(path),
+        "captured_at": parse_frame_timestamp(path),
+        "stored_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+        "size_bytes": stat.st_size,
+        "url": f"/api/cameras/{camera_id}/frames/{day}/{filename}",
+    }
+
+
+def frame_gap_threshold_seconds(camera_id: str) -> int:
+    try:
+        interval = get_camera_config(camera_id).interval_seconds
+    except Exception:
+        interval = 60
+    return max(interval * 2, 120)
+
+
+def frame_gap_responses(paths: List[Path], threshold_seconds: int) -> List[Dict[str, Any]]:
+    gaps = []
+    previous_dt: Optional[datetime] = None
+    previous_path: Optional[Path] = None
+    for path in sorted(paths, key=frame_key):
+        captured = parse_frame_datetime(path)
+        if captured is None:
+            continue
+        if previous_dt is not None and previous_path is not None:
+            delta = int((captured - previous_dt).total_seconds())
+            if delta > threshold_seconds:
+                gaps.append({
+                    "after": frame_key(previous_path),
+                    "before": frame_key(path),
+                    "start": previous_dt.isoformat(),
+                    "end": captured.isoformat(),
+                    "duration_seconds": delta,
+                })
+        previous_dt = captured
+        previous_path = path
+    return gaps
+
+
+def frame_day_response(camera_id: str, day: str, paths: List[Path]) -> Dict[str, Any]:
+    paths = sorted(paths, key=frame_key)
+    captured_values = [
+        captured
+        for captured in (parse_frame_datetime(path) for path in paths)
+        if captured is not None
+    ]
+    first = captured_values[0] if captured_values else None
+    last = captured_values[-1] if captured_values else None
+    total_size = 0
+    for path in paths:
+        try:
+            total_size += path.stat().st_size
+        except OSError:
+            continue
+    gaps = frame_gap_responses(paths, frame_gap_threshold_seconds(camera_id))
+    return {
+        "day": day,
+        "month": day[:7],
+        "count": len(paths),
+        "size_bytes": total_size,
+        "first_captured_at": first.isoformat() if first else None,
+        "last_captured_at": last.isoformat() if last else None,
+        "gaps": gaps,
+        "gap_count": len(gaps),
+    }
+
+
 ONLINE_GRACE_SECONDS = 300
 
 
@@ -834,6 +948,109 @@ def read_latest_image(
     if not latest:
         raise HTTPException(status_code=404, detail="No images uploaded yet")
     return FileResponse(latest, media_type="image/jpeg")
+
+
+@app.get("/api/cameras/{camera_id}/frame-days")
+def list_frame_days(camera_id: str) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    by_day: Dict[str, List[Path]] = {}
+    for path in list_valid_camera_frames(camera_id):
+        by_day.setdefault(path.parent.name, []).append(path)
+
+    days = [
+        frame_day_response(camera_id, day, paths)
+        for day, paths in sorted(by_day.items(), reverse=True)
+    ]
+    month_totals: Dict[str, Dict[str, Any]] = {}
+    for day in days:
+        month = day["month"]
+        month_record = month_totals.setdefault(
+            month,
+            {"month": month, "day_count": 0, "frame_count": 0, "gap_count": 0},
+        )
+        month_record["day_count"] += 1
+        month_record["frame_count"] += day["count"]
+        month_record["gap_count"] += day["gap_count"]
+
+    months = [
+        month_totals[month]
+        for month in sorted(month_totals.keys(), reverse=True)
+    ]
+    return {
+        "days": days,
+        "months": months,
+        "total_days": len(days),
+        "total_frames": sum(day["count"] for day in days),
+    }
+
+
+@app.get("/api/cameras/{camera_id}/frames")
+def list_frames(
+    camera_id: str,
+    day: Optional[str] = None,
+    before: Optional[str] = None,
+    limit: int = Query(60, ge=1, le=5000),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+) -> Dict[str, Any]:
+    camera_id = safe_identifier(camera_id)
+    if day is not None:
+        day = validate_frame_day(day)
+    if before is not None:
+        try:
+            before_day, before_filename = before.split("/", 1)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Invalid frame cursor") from error
+        validate_frame_day(before_day)
+        validate_frame_filename(before_filename)
+
+    frames = list_valid_camera_frames(camera_id)
+    if day is not None:
+        frames = [path for path in frames if path.parent.name == day]
+    frames = sorted(frames, key=frame_key, reverse=(order == "desc"))
+    total = len(frames)
+    if before is not None:
+        frames = [path for path in frames if frame_key(path) < before]
+
+    page = frames[:limit]
+    has_more = len(frames) > limit
+    return {
+        "frames": [frame_to_response(camera_id, path) for path in page],
+        "total": total,
+        "returned": len(page),
+        "has_more": has_more,
+        "next_cursor": frame_key(page[-1]) if has_more and page else None,
+    }
+
+
+@app.get("/api/cameras/{camera_id}/frames/{day}/{filename}")
+def read_frame(
+    camera_id: str,
+    day: str,
+    filename: str,
+) -> FileResponse:
+    camera_id = safe_identifier(camera_id)
+    day = validate_frame_day(day)
+    filename = validate_frame_filename(filename)
+    path = DATA_DIR / "images" / camera_id / day / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Frame not found")
+    return FileResponse(path, media_type="image/jpeg", filename=filename)
+
+
+@app.delete("/api/cameras/{camera_id}/frames/{day}/{filename}", status_code=204)
+def delete_frame(
+    camera_id: str,
+    day: str,
+    filename: str,
+) -> None:
+    camera_id = safe_identifier(camera_id)
+    day = validate_frame_day(day)
+    filename = validate_frame_filename(filename)
+    path = DATA_DIR / "images" / camera_id / day / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Frame not found")
+    path.unlink(missing_ok=True)
+    return None
 
 
 @app.post("/api/cameras/{camera_id}/videos")
