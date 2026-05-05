@@ -133,3 +133,40 @@ def test_checkin_current_light_range(client, tmp_data_dir):
         json={"agent_version": "0.8.0", "current_light": 300},
     )
     assert bad.status_code == 422
+
+
+class TestCheckinDslrFields:
+    def test_checkin_records_active_backend(self, client):
+        client.post("/api/cameras/cam1/checkin", json={"active_backend": "gphoto2"})
+        record = next(c for c in client.get("/api/cameras").json()["cameras"] if c["camera_id"] == "cam1")
+        assert record["status"]["active_backend"] == "gphoto2"
+
+    def test_checkin_records_dslr_status(self, client):
+        client.post(
+            "/api/cameras/cam1/checkin",
+            json={
+                "active_backend": "gphoto2",
+                "dslr": {
+                    "battery_level": "87%",
+                    "available_shots": 1204,
+                    "shutter_counter": 12483,
+                    "exposure_mode": "M",
+                    "choices": {"iso": ["Auto", "100", "200"]},
+                    "last_reinit_token": "2026-05-05T10:00:00Z",
+                    "last_init_at": "2026-05-05T10:00:01Z",
+                },
+            },
+        )
+        record = next(c for c in client.get("/api/cameras").json()["cameras"] if c["camera_id"] == "cam1")
+        dslr = record["status"]["dslr"]
+        assert dslr["battery_level"] == "87%"
+        assert dslr["available_shots"] == 1204
+        assert dslr["exposure_mode"] == "M"
+        assert dslr["choices"]["iso"] == ["Auto", "100", "200"]
+        assert dslr["last_reinit_token"] == "2026-05-05T10:00:00Z"
+
+    def test_checkin_without_dslr_leaves_dslr_none(self, client):
+        client.post("/api/cameras/cam1/checkin", json={"agent_version": "0.9.0"})
+        record = next(c for c in client.get("/api/cameras").json()["cameras"] if c["camera_id"] == "cam1")
+        assert record["status"]["dslr"] is None
+        assert record["status"]["active_backend"] is None

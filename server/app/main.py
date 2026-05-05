@@ -47,6 +47,29 @@ ALLOWED_NETWORKS = [
 ]
 
 
+class DslrSettings(BaseModel):
+    capture_target: str = "Memory card"
+    drive_mode: str = "Single"
+    focus_mode: str = "Manual"
+    shutterspeed: Optional[str] = None
+    aperture: Optional[str] = None
+    iso: Optional[str] = None
+    exposure_compensation: Optional[str] = None
+    whitebalance: Optional[str] = None
+    image_format: Optional[str] = None
+    reinit_token: Optional[str] = None
+
+
+class DslrStatus(BaseModel):
+    battery_level: Optional[str] = None
+    available_shots: Optional[int] = None
+    shutter_counter: Optional[int] = None
+    exposure_mode: Optional[str] = None
+    choices: Dict[str, List[str]] = Field(default_factory=dict)
+    last_reinit_token: Optional[str] = None
+    last_init_at: Optional[str] = None
+
+
 class CameraConfig(BaseModel):
     enabled: bool = True
     interval_seconds: int = Field(900, ge=30, le=86_400)
@@ -90,6 +113,7 @@ class CameraConfig(BaseModel):
             "libcamera-still/raspistill), or 'gphoto2' (USB DSLR via gphoto2)."
         ),
     )
+    dslr: Optional[DslrSettings] = None
 
     @field_validator("camera_backend")
     @classmethod
@@ -184,6 +208,8 @@ class CameraStatus(BaseModel):
     local_hour: Optional[int] = None
     current_light: Optional[int] = Field(default=None, ge=0, le=255)
     signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
+    active_backend: Optional[str] = None
+    dslr: Optional[DslrStatus] = None
 
 
 class CameraRecord(BaseModel):
@@ -203,6 +229,8 @@ class CheckinRequest(BaseModel):
     local_hour: Optional[int] = Field(default=None, ge=0, le=23)
     current_light: Optional[int] = Field(default=None, ge=0, le=255)
     signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
+    active_backend: Optional[str] = None
+    dslr: Optional[DslrStatus] = None
 
 
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
@@ -737,6 +765,10 @@ def post_checkin(
         status["current_light"] = payload.current_light
     if payload.signal_dbm is not None:
         status["signal_dbm"] = payload.signal_dbm
+    if payload.active_backend is not None:
+        status["active_backend"] = payload.active_backend
+    if payload.dslr is not None:
+        status["dslr"] = payload.dslr.model_dump()
     status["last_error"] = payload.last_error
 
     cameras[camera_id] = record
