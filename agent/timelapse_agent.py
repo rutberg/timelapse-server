@@ -63,6 +63,11 @@ class AgentState:
     in_schedule: bool = True
     local_hour: int = 0
     current_light: Optional[int] = None
+    active_backend: Optional[str] = None
+    dslr_choices: Optional[Dict[str, Any]] = None
+    dslr_telemetry: Optional[Dict[str, Any]] = None
+    last_reinit_token: Optional[str] = None
+    last_init_at: Optional[str] = None
 
 
 def next_allowed_hour(current_hour: int, capture_hours: list) -> int:
@@ -445,6 +450,18 @@ def read_wifi_rssi() -> Optional[int]:
 
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
     url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/checkin"
+    dslr_payload: Optional[Dict[str, Any]] = None
+    if state.active_backend == "gphoto2":
+        tel = state.dslr_telemetry or {}
+        dslr_payload = {
+            "battery_level": tel.get("battery_level"),
+            "available_shots": tel.get("available_shots"),
+            "shutter_counter": tel.get("shutter_counter"),
+            "exposure_mode": tel.get("exposure_mode"),
+            "choices": state.dslr_choices or {},
+            "last_reinit_token": state.last_reinit_token,
+            "last_init_at": state.last_init_at,
+        }
     payload = {
         "agent_version": AGENT_VERSION,
         "hostname": socket.gethostname(),
@@ -457,6 +474,8 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "local_hour": state.local_hour,
         "current_light": state.current_light,
         "signal_dbm": read_wifi_rssi(),
+        "active_backend": state.active_backend,
+        "dslr": dslr_payload,
     }
     try:
         post_json(url, payload)
@@ -1050,8 +1069,16 @@ def run_agent(settings: Dict[str, Any]) -> None:
         "Agent v%s started for camera_id=%s (max_pending_bytes=%s)",
         AGENT_VERSION, settings["camera_id"], max_pending_bytes,
     )
-    if resolve_active_backend(remote_config) == "gphoto2":
+    active_backend = resolve_active_backend(remote_config)
+    state.active_backend = active_backend
+    if active_backend == "gphoto2":
         gphoto2_disable_autopoweroff()
+        dslr_config = remote_config.get("dslr") or {}
+        state.dslr_choices = gphoto2_read_choices()
+        if dslr_config:
+            gphoto2_apply_init_settings(dslr_config)
+            state.last_reinit_token = dslr_config.get("reinit_token")
+            state.last_init_at = now_local_iso()
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
     state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
@@ -1082,6 +1109,16 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 logging.info("Capture interval changed to %s seconds", new_interval)
             state.pending_count, state.pending_bytes = measure_pending(work_dir)
             state.pending_count += measure_camera_pending(work_dir)
+            if state.active_backend == "gphoto2":
+                dslr_config = remote_config.get("dslr") or {}
+                new_token = dslr_config.get("reinit_token")
+                if new_token != state.last_reinit_token:
+                    gphoto2_apply_init_settings(dslr_config)
+                    state.dslr_choices = gphoto2_read_choices()
+                    state.last_reinit_token = new_token
+                    state.last_init_at = now_local_iso()
+                    logging.info("DSLR re-initialized (token=%s)", new_token)
+                state.dslr_telemetry = gphoto2_read_telemetry()
             post_checkin(settings, state)
             if check_for_update(settings):
                 logging.info("Exiting to allow systemd restart")
@@ -1153,6 +1190,8 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 )
                 next_capture = now + interval_seconds
         if enabled and in_schedule and now >= next_capture:
+            if state.active_backend == "gphoto2":
+                gphoto2_apply_sequence_settings(remote_config.get("dslr") or {})
             try:
                 image_path = capture_frame(work_dir, remote_config)
                 state.last_capture_at = now_local_iso()

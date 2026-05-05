@@ -590,3 +590,66 @@ class TestGphoto2ReadTelemetry:
         assert result["available_shots"] is None
         assert result["shutter_counter"] is None
         assert result["exposure_mode"] is None
+
+
+from timelapse_agent import (
+    AgentState,
+    post_checkin,
+)
+
+
+class TestAgentStateDslrFields:
+    def test_dslr_fields_default_to_none(self):
+        state = AgentState()
+        assert state.active_backend is None
+        assert state.dslr_choices is None
+        assert state.dslr_telemetry is None
+        assert state.last_reinit_token is None
+        assert state.last_init_at is None
+
+
+class TestPostCheckinDslrPayload:
+    def test_includes_active_backend_and_dslr_when_gphoto2(self):
+        state = AgentState()
+        state.active_backend = "gphoto2"
+        state.dslr_choices = {"iso": ["100", "200"]}
+        state.dslr_telemetry = {
+            "battery_level": "80%",
+            "available_shots": 500,
+            "shutter_counter": 100,
+            "exposure_mode": "M",
+        }
+        state.last_reinit_token = "tok1"
+        state.last_init_at = "2026-05-05T10:00:00+00:00"
+
+        captured = {}
+
+        def fake_post_json(url, payload):
+            captured.update(payload)
+
+        settings = {"server_url": "http://x", "camera_id": "c1"}
+        with patch("timelapse_agent.post_json", side_effect=fake_post_json), \
+             patch("timelapse_agent.read_wifi_rssi", return_value=None):
+            post_checkin(settings, state)
+
+        assert captured["active_backend"] == "gphoto2"
+        assert captured["dslr"]["battery_level"] == "80%"
+        assert captured["dslr"]["choices"] == {"iso": ["100", "200"]}
+        assert captured["dslr"]["last_reinit_token"] == "tok1"
+
+    def test_dslr_payload_is_none_for_rpicam(self):
+        state = AgentState()
+        state.active_backend = "rpicam"
+
+        captured = {}
+
+        def fake_post_json(url, payload):
+            captured.update(payload)
+
+        settings = {"server_url": "http://x", "camera_id": "c1"}
+        with patch("timelapse_agent.post_json", side_effect=fake_post_json), \
+             patch("timelapse_agent.read_wifi_rssi", return_value=None):
+            post_checkin(settings, state)
+
+        assert captured["dslr"] is None
+        assert captured["active_backend"] == "rpicam"
