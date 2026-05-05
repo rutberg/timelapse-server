@@ -639,6 +639,29 @@ def remove_camera_pending(work_dir: Path, ref: CameraFileRef) -> None:
         save_camera_pending(work_dir, filtered)
 
 
+GPHOTO2_STAGE_DIR = Path("/tmp/timelapse-agent-stage")
+
+
+def gphoto2_download_file(ref: CameraFileRef, dest_path: Path, timeout: int = 120) -> Path:
+    """Download a single file from the camera to dest_path.
+
+    The destination should live on tmpfs (/tmp on Pi OS) so the SD card never
+    sees the bytes. Caller is responsible for unlinking dest_path after upload.
+    """
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "gphoto2",
+            "--folder", ref.folder,
+            "--get-file", ref.filename,
+            "--filename", str(dest_path),
+            "--force-overwrite",
+        ],
+        check=True, capture_output=True, text=True, timeout=timeout,
+    )
+    return dest_path
+
+
 def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
     quality = str(config.get("jpeg_quality", DEFAULT_REMOTE_CONFIG["jpeg_quality"]))
 

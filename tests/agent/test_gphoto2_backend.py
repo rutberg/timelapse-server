@@ -203,3 +203,48 @@ class TestCameraPendingState:
         save_camera_pending(tmp_path, [{"folder": "/a", "filename": "Y.CR3", "captured_at": "t"}])
         leftovers = list(tmp_path.glob("*.tmp"))
         assert leftovers == []
+
+
+from pathlib import Path
+
+from timelapse_agent import (
+    GPHOTO2_STAGE_DIR,
+    gphoto2_download_file,
+)
+
+
+class TestGphoto2DownloadFile:
+    def test_calls_gphoto2_with_correct_args(self, tmp_path):
+        ref = CameraFileRef(folder="/store_0001/DCIM/100CANON", filename="IMG_42.CR3")
+        dest = tmp_path / "IMG_42.CR3"
+        # Simulate gphoto2 creating the file as a side effect.
+        def fake_run(cmd, **kwargs):
+            dest.write_bytes(b"fake-image-bytes")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        with patch("timelapse_agent.subprocess.run", side_effect=fake_run) as mock_run:
+            result = gphoto2_download_file(ref, dest)
+        assert result == dest
+        assert dest.exists()
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[0] == "gphoto2"
+        assert "--folder" in cmd_args
+        assert "/store_0001/DCIM/100CANON" in cmd_args
+        assert "--filename" in cmd_args
+        assert str(dest) in cmd_args
+        assert "--get-file" in cmd_args
+        assert "IMG_42.CR3" in cmd_args
+        assert "--force-overwrite" in cmd_args
+
+    def test_creates_parent_directory(self, tmp_path):
+        ref = CameraFileRef(folder="/a", filename="X.CR3")
+        dest = tmp_path / "subdir" / "X.CR3"
+        def fake_run(cmd, **kwargs):
+            dest.write_bytes(b"x")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        with patch("timelapse_agent.subprocess.run", side_effect=fake_run):
+            gphoto2_download_file(ref, dest)
+        assert dest.exists()
+
+    def test_default_stage_dir_is_tmpfs_path(self):
+        # Documents the tmpfs choice — /tmp is RAM-backed on Pi OS.
+        assert GPHOTO2_STAGE_DIR == Path("/tmp/timelapse-agent-stage")
