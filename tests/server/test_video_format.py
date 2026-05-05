@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 import pytest
@@ -27,6 +28,33 @@ def _seed_two_jpegs(tmp_data_dir):
     (cam_dir / "143005.jpg").write_bytes(minimal_jpeg)
 
 
+def parse_sse_done(response) -> dict:
+    """Parse an SSE response and return the data from the 'done' event.
+
+    Raises AssertionError if an 'error' event is received.
+    """
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    done_data = None
+    for raw_event in response.text.split("\n\n"):
+        lines = raw_event.strip().split("\n")
+        event_type = next(
+            (l.split(":", 1)[1].strip() for l in lines if l.startswith("event:")), None
+        )
+        data_str = next(
+            (l.split(":", 1)[1].strip() for l in lines if l.startswith("data:")), None
+        )
+        if not event_type or not data_str:
+            continue
+        data = json.loads(data_str)
+        if event_type == "error":
+            raise AssertionError(f"SSE error event: {data.get('detail')}")
+        if event_type == "done":
+            done_data = data
+    assert done_data is not None, "No 'done' SSE event received"
+    return done_data
+
+
 def test_default_format_is_mp4(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
@@ -34,8 +62,8 @@ def test_default_format_is_mp4(client):
         "/api/cameras/cam-vids/videos",
         json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12},
     )
-    assert response.status_code == 200
-    assert response.json()["path"].endswith(".mp4")
+    done = parse_sse_done(response)
+    assert done["path"].endswith(".mp4")
 
 
 def test_explicit_mp4_format(client):
@@ -45,8 +73,8 @@ def test_explicit_mp4_format(client):
         "/api/cameras/cam-vids/videos",
         json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "mp4"},
     )
-    assert response.status_code == 200
-    assert response.json()["path"].endswith(".mp4")
+    done = parse_sse_done(response)
+    assert done["path"].endswith(".mp4")
 
 
 def test_gif_format(client):
@@ -56,8 +84,8 @@ def test_gif_format(client):
         "/api/cameras/cam-vids/videos",
         json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "gif"},
     )
-    assert response.status_code == 200
-    assert response.json()["path"].endswith(".gif")
+    done = parse_sse_done(response)
+    assert done["path"].endswith(".gif")
 
 
 def test_invalid_format_rejected(client):
@@ -71,11 +99,11 @@ def test_invalid_format_rejected(client):
 def test_gif_can_be_downloaded(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    rendered = client.post(
+    done = parse_sse_done(client.post(
         "/api/cameras/cam-vids/videos",
         json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "gif"},
-    ).json()
-    filename = rendered["path"].split("/")[-1]
+    ))
+    filename = done["path"].split("/")[-1]
     response = client.get(f"/api/cameras/cam-vids/videos/{filename}")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/gif"
@@ -84,11 +112,11 @@ def test_gif_can_be_downloaded(client):
 def test_mp4_can_be_downloaded(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    rendered = client.post(
+    done = parse_sse_done(client.post(
         "/api/cameras/cam-vids/videos",
         json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "mp4"},
-    ).json()
-    filename = rendered["path"].split("/")[-1]
+    ))
+    filename = done["path"].split("/")[-1]
     response = client.get(f"/api/cameras/cam-vids/videos/{filename}")
     assert response.status_code == 200
     assert response.headers["content-type"] == "video/mp4"

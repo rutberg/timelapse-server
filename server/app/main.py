@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -14,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -836,10 +837,11 @@ def read_latest_image(
 
 
 @app.post("/api/cameras/{camera_id}/videos")
-def generate_video(
+async def generate_video(
     camera_id: str,
     request: VideoRequest,
-) -> Dict[str, Any]:
+    http_request: Request,
+) -> StreamingResponse:
     camera_id = safe_identifier(camera_id)
     images = selected_images(camera_id, request)
     if not images:
@@ -866,20 +868,72 @@ def generate_video(
         for path in images:
             list_file.write(f"file '{ffmpeg_escape(path)}'\n")
 
-    try:
-        if request.format == "mp4":
-            run_ffmpeg_mp4(list_path, output_path, request.fps)
-        else:
-            run_ffmpeg_gif(list_path, output_path, request.fps, video_dir, requested_name)
-    finally:
-        list_path.unlink(missing_ok=True)
+    async def event_stream():
+        total_frames = len(images)
+        try:
+            if request.format == "mp4":
+                command = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "concat", "-safe", "0", "-i", str(list_path),
+                    "-vf", f"fps={request.fps},format=yuv420p",
+                    "-c:v", "libx264", "-movflags", "+faststart",
+                    "-progress", "pipe:1",
+                    str(output_path),
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                last_frame = 0
+                try:
+                    while True:
+                        if await http_request.is_disconnected():
+                            process.terminate()
+                            await process.wait()
+                            return
+                        line = await process.stdout.readline()
+                        if not line:
+                            break
+                        text = line.decode("utf-8", errors="replace").strip()
+                        if not text or "=" not in text:
+                            continue
+                        key, value = text.split("=", 1)
+                        if key == "frame":
+                            try:
+                                last_frame = int(value)
+                            except ValueError:
+                                continue
+                        elif key == "progress":
+                            percent = min(100, round(last_frame / total_frames * 100)) if total_frames else 0
+                            yield f"event: progress\ndata: {json.dumps({'frame': last_frame, 'total': total_frames, 'percent': percent})}\n\n"
+                            if value == "end":
+                                break
+                    return_code = await process.wait()
+                    if return_code != 0:
+                        stderr = (await process.stderr.read()).decode("utf-8", errors="replace").strip()
+                        yield f"event: error\ndata: {json.dumps({'detail': stderr or 'ffmpeg failed'})}\n\n"
+                        return
+                finally:
+                    if process.returncode is None:
+                        process.terminate()
+                        await process.wait()
+            else:
+                loop = asyncio.get_running_loop()
+                try:
+                    await loop.run_in_executor(
+                        None, run_ffmpeg_gif,
+                        list_path, output_path, request.fps, video_dir, requested_name,
+                    )
+                except HTTPException as exc:
+                    yield f"event: error\ndata: {json.dumps({'detail': exc.detail})}\n\n"
+                    return
 
-    return {
-        "generated": True,
-        "camera_id": camera_id,
-        "image_count": len(images),
-        "path": str(output_path.relative_to(DATA_DIR)),
-    }
+            yield f"event: done\ndata: {json.dumps({'path': str(output_path.relative_to(DATA_DIR))})}\n\n"
+        finally:
+            list_path.unlink(missing_ok=True)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def run_ffmpeg_mp4(list_path: Path, output_path: Path, fps: int) -> None:
