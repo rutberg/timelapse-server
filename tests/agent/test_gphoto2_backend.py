@@ -436,3 +436,17 @@ class TestMeasureCameraPending:
             {"folder": "/a", "filename": "Z.CR3", "captured_at": "t3"},
         ])
         assert measure_camera_pending(tmp_path) == 3
+
+
+from timelapse_agent import should_sample_light
+
+
+class TestShouldSampleLight:
+    def test_true_for_rpicam(self):
+        assert should_sample_light("rpicam") is True
+
+    def test_false_for_gphoto2(self):
+        assert should_sample_light("gphoto2") is False
+
+    def test_false_for_none(self):
+        assert should_sample_light(None) is False

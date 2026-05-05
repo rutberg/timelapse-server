@@ -824,6 +824,13 @@ def should_capture_for_scene(current_light: Optional[int], threshold: Optional[i
     return current_light >= threshold
 
 
+def should_sample_light(backend: Optional[str]) -> bool:
+    """Light sampling is only available on the rpicam backend (fast YUV thumbnail).
+    DSLRs over gphoto2 have no equivalent fast preview, so we skip sampling
+    and the user can't use scene-light gating with a DSLR."""
+    return backend == "rpicam"
+
+
 def now_local_iso() -> str:
     """ISO-8601 timestamp with explicit UTC offset, in agent local time."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -1008,12 +1015,23 @@ def run_agent(settings: Dict[str, Any]) -> None:
         # a live reading regardless of schedule_mode. Sampling adds ~200ms;
         # negligible compared to the capture interval.
         if enabled and in_schedule and now >= next_capture:
-            tool = find_capture_command()
-            if tool:
-                state.current_light = sample_light_level(tool)
+            active_backend = resolve_active_backend(remote_config)
+            if should_sample_light(active_backend):
+                tool = find_capture_command()
+                if tool:
+                    state.current_light = sample_light_level(tool)
+            else:
+                state.current_light = None
             # Scene-light mode: skip the actual capture if below threshold.
-            if schedule_mode == "scene" and not should_capture_for_scene(
-                state.current_light, remote_config.get("light_threshold")
+            # On gphoto2 backend current_light is always None and the
+            # conservative defaults in should_capture_for_scene mean we never
+            # gate captures out — equivalent to scene mode being a no-op.
+            if (
+                schedule_mode == "scene"
+                and active_backend == "rpicam"
+                and not should_capture_for_scene(
+                    state.current_light, remote_config.get("light_threshold")
+                )
             ):
                 logging.info(
                     "Scene-light gate: Y=%s < threshold=%s, skipping",
