@@ -8,6 +8,7 @@ import logging
 import math
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -547,6 +548,52 @@ def resolve_active_backend(config: Dict[str, Any]) -> Optional[str]:
     if find_capture_command():
         return "rpicam"
     return None
+
+
+@dataclass(frozen=True)
+class CameraFileRef:
+    folder: str
+    filename: str
+
+
+# gphoto2 prints a line like:
+#   New file is in location /store_00020001/DCIM/100CANON/IMG_0042.CR3 on the camera
+_NEW_FILE_RE = re.compile(
+    r"^New file is in location (?P<path>/\S+?) on the camera\s*$"
+)
+
+
+def parse_new_file_location(stdout: str) -> Optional[CameraFileRef]:
+    """Parse gphoto2 --capture-image stdout and return the camera file reference.
+
+    Returns None if no `New file is in location` line is found.
+    """
+    for line in stdout.splitlines():
+        match = _NEW_FILE_RE.match(line)
+        if match:
+            full = match.group("path")
+            folder, _, filename = full.rpartition("/")
+            return CameraFileRef(folder=folder or "/", filename=filename)
+    return None
+
+
+def gphoto2_capture_trigger(timeout: int = 30) -> CameraFileRef:
+    """Trigger a capture on the connected DSLR; image stays on the camera SD.
+
+    Returns the (folder, filename) reference parsed from gphoto2 stdout. Raises
+    RuntimeError if the output can't be parsed, or subprocess.CalledProcessError
+    on a non-zero exit (e.g. camera disconnected, SD full).
+    """
+    result = subprocess.run(
+        ["gphoto2", "--capture-image"],
+        check=True, capture_output=True, text=True, timeout=timeout,
+    )
+    ref = parse_new_file_location(result.stdout)
+    if ref is None:
+        raise RuntimeError(
+            f"Could not parse gphoto2 capture output: {result.stdout!r}"
+        )
+    return ref
 
 
 def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
