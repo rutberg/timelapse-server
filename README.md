@@ -70,53 +70,34 @@ sudo systemctl restart timelapse-server
 
 ---
 
-## Agent Setup (Server-Driven)
+## Agent Setup
 
-The server provisions each Raspberry Pi over SSH the first time you connect it. You only use Raspberry Pi Imager to get the Pi online.
+The system uses a web-based wizard to provision new Raspberry Pi agents. Access it by clicking **Add Agent** in the Web UI.
 
-### 1. Create a pending agent
+### 1. Define the Agent
+Fill out the form in the wizard:
+- **Agent ID**: A unique identifier (e.g., `tomatoes-zero-w`).
+- **Display Name**: A friendly name for the UI.
+- **Expected Hostname**: The hostname the Pi will use on your network (e.g., `timelapse-tomatoes`).
+- **SSH User**: The user created during flashing (usually `pi`).
 
-```bash
-curl -X POST http://<SERVER_IP>:8080/api/agents \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "agent_id": "tomatoes-zero-w",
-    "display_name": "Tomato Cam",
-    "expected_hostname": "timelapse-tomatoes",
-    "ip_fallback": null,
-    "ssh_user": "pi"
-  }'
-```
-
-The response contains a `public_key` line. Copy it.
+Click **Next** to generate the SSH public key. Copy this key for the next step.
 
 ### 2. Flash the SD card with Raspberry Pi Imager
+In Raspberry Pi Imager, choose **Raspberry Pi OS Lite** and open the OS-customisation panel (the gear icon). Set:
 
-In Raspberry Pi Imager, choose **Raspberry Pi OS Lite** and open the OS-customisation panel. Set:
+- **Hostname**: the same value you used for `Expected Hostname`.
+- **SSH**: enabled, **using the public key** you copied from the wizard.
+- **Wi-Fi**: SSID, password, and country.
 
-- Hostname: the same value you used for `expected_hostname`.
-- SSH: enabled, **using the public key** you copied above.
-- Wi-Fi SSID, password, and country.
-
-Flash, insert the SD card, power the Pi on, and wait one minute for first boot.
+Flash, insert the SD card, power the Pi on, and wait one minute for the first boot.
 
 ### 3. Provision
+In the wizard, click **Provision Agent**.
 
-```bash
-curl -X POST http://<SERVER_IP>:8080/api/agents/tomatoes-zero-w/provision \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
+The server will attempt to connect to the Pi at `<hostname>.local`. If your network doesn't support mDNS, you can provide the IP address manually in the wizard.
 
-If the server cannot reach `timelapse-tomatoes.local`, supply the IP:
-```bash
-curl -X POST .../provision -H 'Content-Type: application/json' -d '{"ip_fallback":"192.168.1.50"}'
-```
-
-After success the agent posts a heartbeat within 60 seconds. List agents:
-```bash
-curl http://<SERVER_IP>:8080/api/agents
-```
+Once provisioning is complete, the agent will install itself as a systemd service and post its first heartbeat within 60 seconds. The camera will then appear on the Dashboard.
 
 ---
 
