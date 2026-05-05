@@ -1,3 +1,5 @@
+<img width="1040" height="833" alt="image" src="https://github.com/user-attachments/assets/e7b703fe-f69a-4a24-b22d-0fce6ddfd2bd" />
+
 # Timelapse System
 
 A lightweight, server-controlled timelapse system designed for Raspberry Pi Zero W (or other Pi models) with the Raspberry Pi Camera Module.
