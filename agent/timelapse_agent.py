@@ -662,6 +662,29 @@ def gphoto2_download_file(ref: CameraFileRef, dest_path: Path, timeout: int = 12
     return dest_path
 
 
+def gphoto2_delete_file(ref: CameraFileRef, timeout: int = 30) -> None:
+    """Delete a single file from the camera SD card.
+
+    "File not found" is treated as success — the entry was already gone, which
+    is exactly the state we wanted to reach. Other failures (USB claim errors,
+    write-protected card, etc.) are propagated.
+    """
+    try:
+        subprocess.run(
+            [
+                "gphoto2",
+                "--folder", ref.folder,
+                "--delete-file", ref.filename,
+            ],
+            check=True, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.CalledProcessError as error:
+        stderr = (error.stderr or "").lower()
+        if "file not found" in stderr:
+            return
+        raise
+
+
 def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
     quality = str(config.get("jpeg_quality", DEFAULT_REMOTE_CONFIG["jpeg_quality"]))
 

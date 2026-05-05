@@ -248,3 +248,41 @@ class TestGphoto2DownloadFile:
     def test_default_stage_dir_is_tmpfs_path(self):
         # Documents the tmpfs choice — /tmp is RAM-backed on Pi OS.
         assert GPHOTO2_STAGE_DIR == Path("/tmp/timelapse-agent-stage")
+
+
+from timelapse_agent import gphoto2_delete_file
+
+
+class TestGphoto2DeleteFile:
+    def test_calls_gphoto2_with_correct_args(self):
+        ref = CameraFileRef(folder="/a/b", filename="IMG_1.CR3")
+        completed = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("timelapse_agent.subprocess.run", return_value=completed) as mock_run:
+            gphoto2_delete_file(ref)
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[0] == "gphoto2"
+        assert "--folder" in cmd_args
+        assert "/a/b" in cmd_args
+        assert "--delete-file" in cmd_args
+        assert "IMG_1.CR3" in cmd_args
+
+    def test_swallows_file_not_found_on_camera(self):
+        # If the file is already gone (e.g. user deleted it on the camera, or
+        # we previously deleted it but crashed before removing the state entry),
+        # treat that as success — the queue entry should be cleared either way.
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd="gphoto2",
+            stderr="ERROR: File not found.\n",
+        )
+        with patch("timelapse_agent.subprocess.run", side_effect=err):
+            # Should NOT raise.
+            gphoto2_delete_file(CameraFileRef(folder="/a", filename="GONE.CR3"))
+
+    def test_propagates_other_errors(self):
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd="gphoto2",
+            stderr="ERROR: Could not claim USB device.\n",
+        )
+        with patch("timelapse_agent.subprocess.run", side_effect=err):
+            with pytest.raises(subprocess.CalledProcessError):
+                gphoto2_delete_file(CameraFileRef(folder="/a", filename="X.CR3"))
