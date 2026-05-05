@@ -82,6 +82,24 @@ class CameraConfig(BaseModel):
     )
     latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
     longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    camera_backend: str = Field(
+        default="auto",
+        description=(
+            "Capture backend selection: 'auto' (gphoto2 if a USB camera is "
+            "detected, otherwise rpicam), 'rpicam' (Pi camera via rpicam-still/"
+            "libcamera-still/raspistill), or 'gphoto2' (USB DSLR via gphoto2)."
+        ),
+    )
+
+    @field_validator("camera_backend")
+    @classmethod
+    def _validate_camera_backend(cls, value):
+        allowed = {"auto", "rpicam", "gphoto2"}
+        if value not in allowed:
+            raise ValueError(
+                f"camera_backend must be one of {sorted(allowed)}, got {value!r}"
+            )
+        return value
 
     @field_validator("capture_hours")
     @classmethod
