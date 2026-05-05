@@ -138,3 +138,68 @@ class TestGphoto2CaptureTrigger:
                    side_effect=subprocess.CalledProcessError(1, "gphoto2", stderr="cam offline")):
             with pytest.raises(subprocess.CalledProcessError):
                 gphoto2_capture_trigger()
+
+
+from timelapse_agent import (
+    PENDING_CAMERA_FILES_NAME,
+    load_camera_pending,
+    save_camera_pending,
+    add_camera_pending,
+    remove_camera_pending,
+)
+
+
+class TestCameraPendingState:
+    def test_load_returns_empty_when_file_missing(self, tmp_path):
+        assert load_camera_pending(tmp_path) == []
+
+    def test_save_then_load_roundtrip(self, tmp_path):
+        entries = [
+            {"folder": "/a", "filename": "IMG_1.CR3", "captured_at": "2026-05-05T10:00:00-07:00"},
+            {"folder": "/a", "filename": "IMG_2.CR3", "captured_at": "2026-05-05T10:01:00-07:00"},
+        ]
+        save_camera_pending(tmp_path, entries)
+        assert load_camera_pending(tmp_path) == entries
+
+    def test_save_writes_to_expected_filename(self, tmp_path):
+        save_camera_pending(tmp_path, [])
+        assert (tmp_path / PENDING_CAMERA_FILES_NAME).exists()
+
+    def test_add_appends_entry(self, tmp_path):
+        add_camera_pending(
+            tmp_path,
+            CameraFileRef(folder="/a", filename="X.CR3"),
+            captured_at="2026-05-05T10:00:00-07:00",
+        )
+        add_camera_pending(
+            tmp_path,
+            CameraFileRef(folder="/a", filename="Y.CR3"),
+            captured_at="2026-05-05T10:01:00-07:00",
+        )
+        entries = load_camera_pending(tmp_path)
+        assert len(entries) == 2
+        assert entries[0]["filename"] == "X.CR3"
+        assert entries[1]["filename"] == "Y.CR3"
+
+    def test_remove_drops_matching_entry(self, tmp_path):
+        save_camera_pending(tmp_path, [
+            {"folder": "/a", "filename": "X.CR3", "captured_at": "t1"},
+            {"folder": "/a", "filename": "Y.CR3", "captured_at": "t2"},
+        ])
+        remove_camera_pending(tmp_path, CameraFileRef(folder="/a", filename="X.CR3"))
+        entries = load_camera_pending(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["filename"] == "Y.CR3"
+
+    def test_remove_is_idempotent_when_entry_missing(self, tmp_path):
+        save_camera_pending(tmp_path, [
+            {"folder": "/a", "filename": "X.CR3", "captured_at": "t1"},
+        ])
+        remove_camera_pending(tmp_path, CameraFileRef(folder="/a", filename="ZZZ.CR3"))
+        assert len(load_camera_pending(tmp_path)) == 1
+
+    def test_save_uses_atomic_write(self, tmp_path):
+        save_camera_pending(tmp_path, [{"folder": "/a", "filename": "X.CR3", "captured_at": "t"}])
+        save_camera_pending(tmp_path, [{"folder": "/a", "filename": "Y.CR3", "captured_at": "t"}])
+        leftovers = list(tmp_path.glob("*.tmp"))
+        assert leftovers == []

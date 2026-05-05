@@ -596,6 +596,49 @@ def gphoto2_capture_trigger(timeout: int = 30) -> CameraFileRef:
     return ref
 
 
+PENDING_CAMERA_FILES_NAME = "pending_camera_files.json"
+
+
+def load_camera_pending(work_dir: Path) -> List[Dict[str, str]]:
+    """Read the pending-camera-files queue. Returns [] if file missing or invalid."""
+    path = work_dir / PENDING_CAMERA_FILES_NAME
+    if not path.exists():
+        return []
+    try:
+        data = load_json(path)
+    except (json.JSONDecodeError, OSError):
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return entries if isinstance(entries, list) else []
+
+
+def save_camera_pending(work_dir: Path, entries: List[Dict[str, str]]) -> None:
+    """Atomically write the pending-camera-files queue."""
+    write_json(work_dir / PENDING_CAMERA_FILES_NAME, {"entries": entries})
+
+
+def add_camera_pending(work_dir: Path, ref: CameraFileRef, captured_at: str) -> None:
+    """Append a new pending entry for an image still on the camera."""
+    entries = load_camera_pending(work_dir)
+    entries.append({
+        "folder": ref.folder,
+        "filename": ref.filename,
+        "captured_at": captured_at,
+    })
+    save_camera_pending(work_dir, entries)
+
+
+def remove_camera_pending(work_dir: Path, ref: CameraFileRef) -> None:
+    """Drop the entry matching (folder, filename). No-op if missing."""
+    entries = load_camera_pending(work_dir)
+    filtered = [
+        e for e in entries
+        if not (e.get("folder") == ref.folder and e.get("filename") == ref.filename)
+    ]
+    if len(filtered) != len(entries):
+        save_camera_pending(work_dir, filtered)
+
+
 def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
     quality = str(config.get("jpeg_quality", DEFAULT_REMOTE_CONFIG["jpeg_quality"]))
 
