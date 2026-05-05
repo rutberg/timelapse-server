@@ -405,8 +405,89 @@ async function renderCamera(root, hash) {
       </div>`;
   }
 
+  const DSLR_DEFAULTS = {
+    shutterspeed: ['bulb','30','25','20','15','13','10','8','6','5','4','3.2','2.5','2','1.6','1.3','1','0.8','0.6','0.5','0.4','0.3','1/4','1/5','1/6','1/8','1/10','1/13','1/15','1/20','1/25','1/30','1/40','1/50','1/60','1/80','1/100','1/125','1/160','1/200','1/250','1/320','1/400','1/500','1/640','1/800','1/1000','1/1250','1/1600','1/2000','1/2500','1/3200','1/4000','1/5000','1/6400','1/8000'],
+    aperture: ['1.2','1.4','1.6','1.8','2','2.2','2.5','2.8','3.2','3.5','4','4.5','5','5.6','6.3','7.1','8','9','10','11','13','14','16','18','20','22'],
+    iso: ['Auto','100','125','160','200','250','320','400','500','640','800','1000','1250','1600','2000','2500','3200','4000','5000','6400','8000','10000','12800','25600','51200','102400'],
+    exposurecompensation: ['-3','-2.6667','-2.3333','-2','-1.6667','-1.3333','-1','-0.6667','-0.3333','0','0.3333','0.6667','1','1.3333','1.6667','2','2.3333','2.6667','3'],
+    whitebalance: ['Auto','Daylight','Cloudy','Tungsten','Fluorescent','Flash','Custom','Shade','Color Temperature'],
+    imageformat: ['Large Fine JPEG','Large Normal JPEG','Medium Fine JPEG','Small Fine JPEG','RAW','RAW + Large Fine JPEG','cRAW','cRAW + Large Fine JPEG'],
+  };
+
+  const DSLR_INIT_CHOICES = {
+    capturetarget: ['Internal RAM','Memory card'],
+    drivemode: ['Single','Continuous','Self Timer 2 sec','Self Timer 10 sec'],
+    focusmode: ['Manual','One Shot','AI Servo','Single','Servo'],
+  };
+
+  function dslrSelect(id, label, gphotoKey, choices, selected) {
+    const opts = ['', ...choices].map(v =>
+      `<option value="${escapeHtml(v)}" ${v === (selected || '') ? 'selected' : ''}>${escapeHtml(v) || '— (leave as-is)'}</option>`
+    ).join('');
+    return `<label class="field"><span class="lbl">${label}</span><select class="input" id="${id}">${opts}</select></label>`;
+  }
+
+  function renderDslrSection(cfg, status) {
+    const dslrCfg = cfg.dslr || {};
+    const dslrSt = status && status.dslr || {};
+    const choices = dslrSt.choices || {};
+    const expMode = dslrSt.exposure_mode || '—';
+    const expBadge = expMode === 'M'
+      ? `<span style="color:var(--green,#22c55e)">${escapeHtml(expMode)}</span>`
+      : `<span style="color:var(--amber,#f59e0b)">${escapeHtml(expMode)} — manual mode recommended</span>`;
+    const reinitPending = dslrCfg.reinit_token && dslrCfg.reinit_token !== dslrSt.last_reinit_token;
+
+    const initOpts = (key, field, def) => DSLR_INIT_CHOICES[key].map(v =>
+      `<option value="${escapeHtml(v)}" ${v === (dslrCfg[field] || def) ? 'selected' : ''}>${escapeHtml(v)}</option>`
+    ).join('');
+
+    return `
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">DSLR Status</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px;font-size:13px">
+          <div><div class="lbl" style="font-size:11px">Battery</div>${escapeHtml(dslrSt.battery_level || '—')}</div>
+          <div><div class="lbl" style="font-size:11px">Available shots</div>${dslrSt.available_shots != null ? Number(dslrSt.available_shots).toLocaleString() : '—'}</div>
+          <div><div class="lbl" style="font-size:11px">Shutter count</div>${dslrSt.shutter_counter != null ? Number(dslrSt.shutter_counter).toLocaleString() : '—'}</div>
+        </div>
+        <div style="margin-top:8px;font-size:13px"><span class="lbl" style="font-size:11px">Exposure mode</span> ${expBadge}</div>
+      </div></div>
+
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">Camera Initialization</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
+          <label class="field"><span class="lbl">Capture target</span>
+            <select class="input" id="d-capturetarget">${initOpts('capturetarget','capture_target','Memory card')}</select>
+          </label>
+          <label class="field"><span class="lbl">Drive mode</span>
+            <select class="input" id="d-drivemode">${initOpts('drivemode','drive_mode','Single')}</select>
+          </label>
+          <label class="field"><span class="lbl">Focus mode</span>
+            <select class="input" id="d-focusmode">${initOpts('focusmode','focus_mode','Manual')}</select>
+          </label>
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+          <button class="btn" data-reinit>${reinitPending ? '⏳ Re-initializing…' : 'Re-initialize'}</button>
+          <span class="small" id="reinit-msg"></span>
+        </div>
+      </div></div>
+
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">Capture Settings</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
+          ${dslrSelect('d-shutterspeed','Shutter speed','shutterspeed',choices.shutterspeed||DSLR_DEFAULTS.shutterspeed,dslrCfg.shutterspeed)}
+          ${dslrSelect('d-aperture','Aperture','aperture',choices.aperture||DSLR_DEFAULTS.aperture,dslrCfg.aperture)}
+          ${dslrSelect('d-iso','ISO','iso',choices.iso||DSLR_DEFAULTS.iso,dslrCfg.iso)}
+          ${dslrSelect('d-expcomp','Exposure comp.','exposurecompensation',choices.exposurecompensation||DSLR_DEFAULTS.exposurecompensation,dslrCfg.exposure_compensation)}
+          ${dslrSelect('d-wb','White balance','whitebalance',choices.whitebalance||DSLR_DEFAULTS.whitebalance,dslrCfg.whitebalance)}
+          ${dslrSelect('d-fmt','Image format','imageformat',choices.imageformat||DSLR_DEFAULTS.imageformat,dslrCfg.image_format)}
+        </div>
+      </div></div>`;
+  }
+
   function renderSettingsTab() {
     const cfg = camera.config || {};
+    const isGphoto2 = cfg.camera_backend === 'gphoto2' || camera.status && camera.status.active_backend === 'gphoto2';
+    const hide = isGphoto2 ? ' style="display:none"' : '';
     return `
       <div style="padding:24px;max-width:720px">
         <div class="card"><div class="card-b">
@@ -418,13 +499,13 @@ async function renderCamera(root, hash) {
             <label class="field"><span class="lbl">Interval (seconds)</span>
               <input class="input" id="s-interval" type="number" min="30" max="86400" value="${cfg.interval_seconds||600}"/>
             </label>
-            <label class="field"><span class="lbl">Width (px)</span>
+            <label class="field"${hide}><span class="lbl">Width (px)</span>
               <input class="input" id="s-width" type="number" min="320" max="10000" value="${cfg.image_width||""}" placeholder="full"/>
             </label>
-            <label class="field"><span class="lbl">Height (px)</span>
+            <label class="field"${hide}><span class="lbl">Height (px)</span>
               <input class="input" id="s-height" type="number" min="240" max="10000" value="${cfg.image_height||""}" placeholder="full"/>
             </label>
-            <label class="field"><span class="lbl">JPEG quality (1–100)</span>
+            <label class="field"${hide}><span class="lbl">JPEG quality (1–100)</span>
               <input class="input" id="s-quality" type="number" min="1" max="100" value="${cfg.jpeg_quality||85}"/>
             </label>
             <label class="field"><span class="lbl">Desired agent version</span>
@@ -432,6 +513,8 @@ async function renderCamera(root, hash) {
             </label>
           </div>
         </div></div>
+
+        ${isGphoto2 ? renderDslrSection(cfg, camera.status) : ''}
 
         <div class="row" style="margin-top:14px;gap:8px">
           <button class="btn primary" data-save-settings>Save settings</button>
@@ -442,27 +525,70 @@ async function renderCamera(root, hash) {
   }
 
   function wireSettings() {
-    document.querySelector("[data-save-settings]").addEventListener("click", async () => {
-      const optNum = (id) => { const v = document.getElementById(id).value; return v ? Number(v) : null; };
-      const payload = {
+    const isGphoto2 = (camera.config && camera.config.camera_backend === 'gphoto2') || (camera.status && camera.status.active_backend === 'gphoto2');
+    const optNum = (id) => { const el = document.getElementById(id); return el && el.value ? Number(el.value) : null; };
+    const selVal = (id) => { const el = document.getElementById(id); return el ? el.value || null : null; };
+
+    function buildDslrPayload(withReinit) {
+      const existing = camera.config && camera.config.dslr || {};
+      return {
+        capture_target: selVal('d-capturetarget') || existing.capture_target || 'Memory card',
+        drive_mode: selVal('d-drivemode') || existing.drive_mode || 'Single',
+        focus_mode: selVal('d-focusmode') || existing.focus_mode || 'Manual',
+        shutterspeed: selVal('d-shutterspeed'),
+        aperture: selVal('d-aperture'),
+        iso: selVal('d-iso'),
+        exposure_compensation: selVal('d-expcomp'),
+        whitebalance: selVal('d-wb'),
+        image_format: selVal('d-fmt'),
+        reinit_token: withReinit ? new Date().toISOString() : (existing.reinit_token || null),
+      };
+    }
+
+    function buildBasePayload() {
+      return {
         ...camera.config,
         display_name: document.getElementById("s-name").value.trim() || null,
         interval_seconds: Number(document.getElementById("s-interval").value),
         image_width:  optNum("s-width"),
         image_height: optNum("s-height"),
-        jpeg_quality: Number(document.getElementById("s-quality").value),
+        jpeg_quality: Number(document.getElementById("s-quality").value) || 85,
         desired_agent_version: document.getElementById("s-version").value.trim() || null,
       };
+    }
+
+    document.querySelector("[data-save-settings]").addEventListener("click", async () => {
+      const payload = {
+        ...buildBasePayload(),
+        ...(isGphoto2 ? { dslr: buildDslrPayload(false) } : {}),
+      };
+      const msg = document.getElementById("settings-msg");
       try {
         camera.config = await api.fetchJson(`/api/cameras/${encId}/config`, { method:"PUT", body: JSON.stringify(payload) });
-        const msg = document.getElementById("settings-msg");
         msg.textContent = "Saved."; msg.style.color = "var(--green)";
         invalidateSidebar();
       } catch (e) {
-        const msg = document.getElementById("settings-msg");
         msg.textContent = e.message; msg.style.color = "var(--red)";
       }
     });
+
+    const reinitBtn = document.querySelector("[data-reinit]");
+    if (reinitBtn) {
+      reinitBtn.addEventListener("click", async () => {
+        const payload = { ...buildBasePayload(), dslr: buildDslrPayload(true) };
+        const msgEl = document.getElementById("reinit-msg");
+        try {
+          camera.config = await api.fetchJson(`/api/cameras/${encId}/config`, { method:"PUT", body: JSON.stringify(payload) });
+          reinitBtn.textContent = "⏳ Re-initializing…";
+          reinitBtn.disabled = true;
+          if (msgEl) { msgEl.textContent = "Sent. Camera will re-initialize on next poll."; msgEl.style.color = "var(--green)"; }
+          invalidateSidebar();
+        } catch (e) {
+          if (msgEl) { msgEl.textContent = e.message; msgEl.style.color = "var(--red)"; }
+        }
+      });
+    }
+
     document.querySelector("[data-delete-camera]").addEventListener("click", () => {
       if (!confirm(`Delete camera "${cameraId}"? This cannot be undone.`)) return;
       api.fetchJson(`/api/cameras/${encId}`, { method:"DELETE" })
