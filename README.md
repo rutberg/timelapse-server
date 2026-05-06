@@ -41,8 +41,8 @@ The UI is served from `/static/` and uses Alpine.js + pico.css. Both are vendore
 On a fresh Debian installation, you can install the server with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rutberg/timelapse/main/scripts/install-server.sh \
-  | sudo env TIMELAPSE_REPO_URL=https://github.com/rutberg/timelapse bash
+curl -fsSL https://raw.githubusercontent.com/rutberg/timelapse-server/main/scripts/install-server.sh \
+  | sudo env TIMELAPSE_REPO_URL=https://github.com/rutberg/timelapse-server bash
 ```
 
 The installer will:

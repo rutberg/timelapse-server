@@ -1,6 +1,6 @@
 # Implementation plan — Per-camera DSLR/PTP property discovery
 
-Tracking issue: [#13 — Per-camera DSLR/PTP property discovery wizard](https://github.com/rutberg/timelapse/issues/13)
+Tracking issue: [#13 — Per-camera DSLR/PTP property discovery wizard](https://github.com/rutberg/timelapse-server/issues/13)
 
 Scope: explicit support for **Canon, Nikon, and Sony DSLRs minimum** (per
 follow-up direction on the issue), with a property-map architecture that
@@ -590,7 +590,7 @@ backwards compatible. Steps 4–6 sequentially turn on the new behaviour.
 
 ## References
 
-- Issue #13: <https://github.com/rutberg/timelapse/issues/13>
+- Issue #13: <https://github.com/rutberg/timelapse-server/issues/13>
 - libgphoto2 per-camera dumps:
   <https://github.com/gphoto/libgphoto2/tree/master/camlibs/ptp2/cameras>
   - `canon-eos-r6.txt`, `canon-eos-1000d.txt`

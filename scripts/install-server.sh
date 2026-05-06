@@ -7,7 +7,7 @@ Usage:
   sudo scripts/install-server.sh
 
 Optional environment variables:
-  TIMELAPSE_REPO_URL=https://github.com/rutberg/timelapse
+  TIMELAPSE_REPO_URL=https://github.com/rutberg/timelapse-server
   TIMELAPSE_INSTALL_DIR=/opt/timelapse
   TIMELAPSE_DATA_DIR=/srv/timelapse
   TIMELAPSE_BIND_HOST=0.0.0.0
