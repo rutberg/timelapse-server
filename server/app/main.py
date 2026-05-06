@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -196,6 +197,15 @@ class CameraConfig(BaseModel):
         default=None,
         max_length=120,
         description="Human-friendly camera label. Falls back to camera_id.",
+    )
+    location_label: Optional[str] = Field(
+        default=None,
+        max_length=120,
+        description="Human-friendly location description, e.g. 'Greenhouse shelf 2'.",
+    )
+    featured_at: Optional[str] = Field(
+        default=None,
+        description="ISO datetime when this camera was last featured. None = not featured.",
     )
     latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
     longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
@@ -1062,6 +1072,46 @@ def update_config(
     config: CameraConfig,
 ) -> CameraConfig:
     return set_camera_config(camera_id, config)
+
+
+class FeatureRequest(BaseModel):
+    featured: bool
+
+
+# Serializes read-modify-write on the feature endpoint so rapid clicks from the
+# UI don't drop updates. FastAPI runs sync `def` endpoints in a thread pool;
+# without this lock two concurrent requests can each load the store, modify
+# disjoint cameras, and the second save overwrites the first.
+_feature_lock = threading.Lock()
+
+
+@app.post("/api/cameras/{camera_id}/feature")
+def set_camera_featured(camera_id: str, body: FeatureRequest) -> CameraConfig:
+    camera_id = safe_identifier(camera_id)
+    with _feature_lock:
+        store = load_store()
+        cameras = store.setdefault("cameras", {})
+        if camera_id not in cameras:
+            cameras[camera_id] = model_dict(CameraRecord())
+        if body.featured:
+            now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            cameras[camera_id]["config"]["featured_at"] = now_iso
+            # Enforce 3-slot max: newest featured = slot 1, oldest dropped first
+            featured = sorted(
+                [
+                    (cid, rec["config"].get("featured_at"))
+                    for cid, rec in cameras.items()
+                    if rec.get("config", {}).get("featured_at")
+                ],
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            for cid, _ in featured[3:]:
+                cameras[cid]["config"]["featured_at"] = None
+        else:
+            cameras[camera_id]["config"]["featured_at"] = None
+        save_store(store)
+        return CameraConfig(**cameras[camera_id]["config"])
 
 
 @app.post("/api/cameras/{camera_id}/checkin")

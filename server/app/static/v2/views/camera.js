@@ -256,6 +256,10 @@ async function renderCamera(root, hash, isActive = () => true) {
             "click",
             togglePause,
         );
+        root.querySelector('[data-toggle-featured]')?.addEventListener(
+            "click",
+            toggleFeatured,
+        );
     }
 
     async function togglePause() {
@@ -264,6 +268,19 @@ async function renderCamera(root, hash, isActive = () => true) {
             camera.config = await api.fetchJson(
                 `/api/cameras/${encId}/config`,
                 { method: "PUT", body: JSON.stringify(next) },
+            );
+            paint();
+        } catch (e) {
+            alert(e.message);
+        }
+    }
+
+    async function toggleFeatured() {
+        const featured = !camera.config?.featured_at;
+        try {
+            camera.config = await api.fetchJson(
+                `/api/cameras/${encId}/feature`,
+                { method: "POST", body: JSON.stringify({ featured }) },
             );
             paint();
         } catch (e) {
@@ -323,9 +340,14 @@ async function renderCamera(root, hash, isActive = () => true) {
           <div class="card"><div class="card-b">
             <div class="between">
               <div class="lbl">Status</div>
-              <button class="btn ghost sm" data-action="toggle-pause" title="${cfg.enabled ? "Pause capture" : "Resume capture"}">
-                ${icon(cfg.enabled ? "pause" : "play", 11)}${cfg.enabled ? "Pause" : "Resume"}
-              </button>
+              <div class="row" style="gap:6px">
+                <button class="btn ghost sm" data-toggle-featured style="${cfg.featured_at ? "color:var(--accent-2)" : ""}">
+                  ${icon("star", 11)}${cfg.featured_at ? "Featured" : "Feature"}
+                </button>
+                <button class="btn ghost sm" data-action="toggle-pause" title="${cfg.enabled ? "Pause capture" : "Resume capture"}">
+                  ${icon(cfg.enabled ? "pause" : "play", 11)}${cfg.enabled ? "Pause" : "Resume"}
+                </button>
+              </div>
             </div>
             <div class="row" style="margin-top:6px">
               <span class="dot ${statusKind(status) === "live" ? "green pulse" : statusKind(status) === "failed" ? "red" : "grey"}"></span>
@@ -2039,6 +2061,9 @@ async function renderCamera(root, hash, isActive = () => true) {
             <label class="field"><span class="lbl">Display name</span>
               <input class="input sans" id="s-name" value="${escapeHtml(cfg.display_name || "")}" placeholder="${escapeHtml(camera.camera_id)}"/>
             </label>
+            <label class="field"><span class="lbl">Location</span>
+              <input class="input sans" id="s-location" value="${escapeHtml(cfg.location_label || "")}" placeholder="e.g. Greenhouse shelf 2"/>
+            </label>
             <label class="field"><span class="lbl">Interval (seconds)</span>
               <input class="input" id="s-interval" type="number" min="30" max="86400" value="${cfg.interval_seconds || 600}"/>
             </label>
@@ -2139,6 +2164,8 @@ async function renderCamera(root, hash, isActive = () => true) {
                 ...camera.config,
                 display_name:
                     document.getElementById("s-name").value.trim() || null,
+                location_label:
+                    document.getElementById("s-location").value.trim() || null,
                 interval_seconds: Number(
                     document.getElementById("s-interval").value,
                 ),
