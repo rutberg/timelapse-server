@@ -6,9 +6,11 @@ from unittest.mock import MagicMock, patch
 
 from timelapse_agent import (
     AgentState,
+    _prop_map_read_keys,
     gphoto2_apply_init_settings,
     gphoto2_apply_sequence_settings,
     gphoto2_list_config,
+    gphoto2_read_choices_and_current,
     gphoto2_read_telemetry,
     parse_body_info,
     parse_list_all_config,
@@ -116,6 +118,25 @@ class TestPostDiscoveryResult:
                                   token="tok", error="something broke")
 
 
+class TestPostDiscoveryResultReturnsBool:
+    def test_returns_true_on_success(self):
+        with patch("timelapse_agent.post_json", return_value={"acknowledged": True}):
+            ok = post_discovery_result(
+                {"server_url": "http://srv", "camera_id": "c"},
+                token="t", raw_config={}, body={},
+            )
+        assert ok is True
+
+    def test_returns_false_on_network_error(self):
+        from urllib.error import URLError
+        with patch("timelapse_agent.post_json", side_effect=URLError("nope")):
+            ok = post_discovery_result(
+                {"server_url": "http://srv", "camera_id": "c"},
+                token="t", error="boom",
+            )
+        assert ok is False
+
+
 class TestRunDslrDiscovery:
     def test_happy_path_runs_list_config_then_posts(self):
         settings = {"server_url": "http://srv", "camera_id": "cam1"}
@@ -157,6 +178,38 @@ class TestRunDslrDiscovery:
         assert state.last_discovery_token == "tok-err"
         assert captured["token"] == "tok-err"
         assert "error" in captured
+
+    def test_token_not_handled_when_post_fails(self):
+        # Regression for codex P2: a transient network blip on the result POST
+        # used to mark the token handled, leaving the wizard stuck on
+        # "waiting for agent…" until its 5-minute timeout. We must leave the
+        # token unhandled so the next config-poll retries.
+        from urllib.error import URLError
+
+        settings = {"server_url": "http://srv", "camera_id": "cam1"}
+        state = AgentState()
+        completed = MagicMock(returncode=0, stdout=_LIST_ALL_CONFIG_SAMPLE, stderr="")
+
+        with patch("timelapse_agent.subprocess.run", return_value=completed), \
+             patch("timelapse_agent.post_json", side_effect=URLError("net down")):
+            run_dslr_discovery(settings, state, token="tok-flaky")
+
+        # Token NOT marked handled — agent will retry on the next poll.
+        assert state.last_discovery_token is None
+
+    def test_token_not_handled_when_error_post_fails(self):
+        # Same logic on the gphoto2-failure branch: if both gphoto2 AND the
+        # error POST fail, the server still doesn't know — retry next poll.
+        from urllib.error import URLError
+
+        settings = {"server_url": "http://srv", "camera_id": "cam1"}
+        state = AgentState()
+        with patch("timelapse_agent.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, "gphoto2", stderr="dead")), \
+             patch("timelapse_agent.post_json", side_effect=URLError("net down")):
+            run_dslr_discovery(settings, state, token="tok-double-fail")
+
+        assert state.last_discovery_token is None
 
 
 # Property-map-driven helpers — Step 4 of the plan.
@@ -207,6 +260,73 @@ _SONY_PROP_MAP = {
     ],
     "init_keys": [],
 }
+
+
+class TestPropMapReadKeysIncludesWriteKey:
+    def test_nikon_shutterspeed2_included(self):
+        # Regression for codex P2: when read_key != write_key, the writable
+        # name (shutterspeed2 on Nikon) is where gphoto2 stores the choice
+        # list. Both must be queried.
+        keys = _prop_map_read_keys(_NIKON_PROP_MAP)
+        assert "shutterspeed" in keys
+        assert "shutterspeed2" in keys
+
+    def test_no_duplicates_when_keys_equal(self):
+        # Sony/Canon: read_key == write_key → only listed once.
+        keys = _prop_map_read_keys(_SONY_PROP_MAP)
+        assert keys.count("iso") == 1
+
+
+class TestNikonChoicesAliasing:
+    def test_shutterspeed_choices_populated_from_shutterspeed2(self):
+        # Regression for codex P2. Nikon: `shutterspeed` is read-only and
+        # gphoto2 returns no Choice: lines for it. The agent must read
+        # `shutterspeed2` (where the radio choices live) AND surface them
+        # under `shutterspeed` so the UI's choices[d.read_key] lookup works.
+        outputs = {
+            "shutterspeed": (
+                "Label: Shutter Speed\nReadonly: 1\nType: TEXT\nCurrent: 1/125\n"
+            ),
+            "shutterspeed2": (
+                "Label: Shutter Speed 2\nReadonly: 0\nType: RADIO\n"
+                "Current: 1/125\nChoice: 0 1/4000\nChoice: 1 1/2000\n"
+                "Choice: 2 1/1000\nChoice: 3 1/500\nChoice: 4 1/250\n"
+                "Choice: 5 1/125\n"
+            ),
+            "f-number": (
+                "Label: F-Number\nReadonly: 0\nType: RADIO\nCurrent: f/5.6\n"
+                "Choice: 0 f/4\nChoice: 1 f/5.6\n"
+            ),
+            "iso": (
+                "Label: ISO\nReadonly: 0\nType: RADIO\nCurrent: 400\n"
+                "Choice: 0 100\nChoice: 1 400\n"
+            ),
+            "capturemode": (
+                "Label: Capture Mode\nReadonly: 0\nType: RADIO\nCurrent: Single\n"
+                "Choice: 0 Single\nChoice: 1 Continuous\n"
+            ),
+            "focusmode": (
+                "Label: Focus\nReadonly: 0\nType: RADIO\nCurrent: Manual\n"
+                "Choice: 0 Manual\nChoice: 1 AF-S\n"
+            ),
+        }
+
+        def fake_run(cmd, **_kw):
+            key = cmd[2]
+            return MagicMock(returncode=0, stdout=outputs.get(key, ""), stderr="")
+
+        with patch("timelapse_agent.subprocess.run", side_effect=fake_run):
+            choices, current = gphoto2_read_choices_and_current(prop_map=_NIKON_PROP_MAP)
+
+        # The UI looks up choices by read_key. Without aliasing this would be
+        # an empty list and the dropdown would render with no options.
+        assert choices.get("shutterspeed") == [
+            "1/4000", "1/2000", "1/1000", "1/500", "1/250", "1/125",
+        ]
+        # write_key entry is also present (harmless; UI ignores it).
+        assert "shutterspeed2" in choices
+        # Live current value comes from the read_key.
+        assert current.get("shutterspeed") == "1/125"
 
 
 class TestGphoto2ApplySequenceSettingsWithPropMap:

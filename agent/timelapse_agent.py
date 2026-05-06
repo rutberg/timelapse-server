@@ -762,9 +762,13 @@ def gphoto2_read_choices_and_current(
 ) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
     """Read available choices and the current value for each setting in one pass.
 
-    When `prop_map` is provided, the keys to read are the union of
-    `setting_dropdowns[*].read_key` and `init_keys[*].read_key`. Otherwise the
-    legacy `_DSLR_CHOICE_KEYS` (Canon-flavoured) list is used.
+    When `prop_map` is provided, we read both `read_key` and (when different)
+    `write_key` for each setting/init entry. The Nikon shutterspeed quirk is
+    why: `shutterspeed` is read-only with no choices, while `shutterspeed2`
+    holds the writable RADIO list. Without reading `shutterspeed2` here the
+    UI's `choices[d.read_key]` lookup would return an empty list and the
+    dropdown would degenerate to "leave as-is". After reading we alias each
+    write_key's choices back under the read_key so the UI stays simple.
     """
     if keys is None:
         if prop_map is not None:
@@ -794,7 +798,26 @@ def gphoto2_read_choices_and_current(
             choices[key] = values
         if current is not None:
             current_values[key] = current
+    if prop_map is not None:
+        _alias_write_choices_to_read(prop_map, choices)
     return choices, current_values
+
+
+def _alias_write_choices_to_read(
+    prop_map: Dict[str, Any], choices: Dict[str, List[str]]
+) -> None:
+    """For Nikon-style read/write splits, copy write_key's choices under
+    read_key when read_key has none. The UI looks up choices by read_key, so
+    without this aliasing the discovered shutter-speed control on Nikon
+    bodies would render with no options."""
+    for entry in (prop_map.get("setting_dropdowns") or []) + (
+        prop_map.get("init_keys") or []
+    ):
+        r, w = entry.get("read_key"), entry.get("write_key")
+        if not r or not w or r == w:
+            continue
+        if not choices.get(r) and choices.get(w):
+            choices[r] = choices[w]
 
 
 def gphoto2_read_choices(keys: List[str]) -> Dict[str, List[str]]:
@@ -822,14 +845,26 @@ def gphoto2_read_current_values(
 
 
 def _prop_map_read_keys(prop_map: Dict[str, Any]) -> List[str]:
-    """All gphoto2 keys we'd want choices/current for, given a property map."""
+    """All gphoto2 keys we'd want choices/current for, given a property map.
+
+    Includes both `read_key` and `write_key` when they differ — the writable
+    name is where the choice list lives on Nikon (shutterspeed2), while the
+    read name carries the live current value.
+    """
     keys: List[str] = []
+    seen: set = set()
+
+    def add(key: Optional[str]) -> None:
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+
     for d in prop_map.get("setting_dropdowns") or []:
-        if d.get("read_key"):
-            keys.append(d["read_key"])
+        add(d.get("read_key"))
+        add(d.get("write_key"))
     for k in prop_map.get("init_keys") or []:
-        if k.get("read_key"):
-            keys.append(k["read_key"])
+        add(k.get("read_key"))
+        add(k.get("write_key"))
     return keys
 
 
@@ -1064,12 +1099,13 @@ def post_discovery_result(
     raw_config: Optional[Dict[str, Dict[str, Any]]] = None,
     body: Optional[Dict[str, Optional[str]]] = None,
     error: Optional[str] = None,
-) -> None:
+) -> bool:
     """Send the discovery callback to the server.
 
-    Failures are logged and swallowed so a transient network issue can't strand
-    the agent — the server's stale-token check means a retry on the next poll
-    is harmless.
+    Returns True if the POST succeeded, False if it hit a transient HTTP /
+    network / timeout failure. Callers should only mark the token handled on
+    success; otherwise we'd strand the wizard waiting for a result we never
+    delivered.
     """
     url = (
         settings["server_url"].rstrip("/")
@@ -1084,30 +1120,38 @@ def post_discovery_result(
         payload["error"] = error
     try:
         post_json(url, payload)
+        return True
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
         logging.warning("Discovery result POST failed: %s", err)
+        return False
 
 
 def run_dslr_discovery(
     settings: Dict[str, Any], state: AgentState, token: str
 ) -> None:
-    """Run `gphoto2 --list-all-config`, post the parsed tree to the server."""
+    """Run `gphoto2 --list-all-config`, post the parsed tree to the server.
+
+    The token is only marked handled when the server has acknowledged our
+    callback. If the POST fails (transient network blip), we leave the token
+    unhandled so the next config poll retries — otherwise the wizard would
+    sit on "waiting for agent…" until its 5-minute timeout.
+    """
     logging.info("Running DSLR discovery (token=%s)", token)
     try:
         tree = gphoto2_list_config()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
             FileNotFoundError) as err:
         logging.warning("DSLR discovery failed: %s", err)
-        post_discovery_result(settings, token, error=str(err))
-        state.last_discovery_token = token
+        if post_discovery_result(settings, token, error=str(err)):
+            state.last_discovery_token = token
         return
     body = parse_body_info(tree)
-    post_discovery_result(settings, token, raw_config=tree, body=body)
-    state.last_discovery_token = token
-    logging.info(
-        "DSLR discovery posted: %d keys, vendor=%s model=%s",
-        len(tree), body.get("vendor"), body.get("model"),
-    )
+    if post_discovery_result(settings, token, raw_config=tree, body=body):
+        state.last_discovery_token = token
+        logging.info(
+            "DSLR discovery posted: %d keys, vendor=%s model=%s",
+            len(tree), body.get("vendor"), body.get("model"),
+        )
 
 
 def measure_camera_pending(work_dir: Path) -> int:
