@@ -184,6 +184,15 @@ input, select, textarea { font-family: inherit; }
 
 .tile-featured { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--soft); flex-shrink: 0; margin-left: 8px; }
 
+/* 24h sparkline — deterministic stand-in until the API exposes per-hour history. */
+.tile-spark { margin-top: 14px; }
+.tile-spark .between { margin-bottom: 4px; }
+.bar-row { display: flex; align-items: end; gap: 2px; height: 22px; }
+.bar-row > span { flex: 1; background: var(--ink); opacity: .55; border-radius: 1px; min-width: 0; }
+.tile.size-xl .bar-row { height: 36px; }
+.tile.size-lg .bar-row { height: 28px; }
+.tile.vertical .bar-row { height: 28px; }
+
 /* Adaptive walls — outer container, then mode-specific grids set inline. */
 .wall { padding: 22px; display: grid; gap: 16px; }
 .wall .wall-section-label { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--soft); margin-top: 6px; }
@@ -192,8 +201,6 @@ input, select, textarea { font-family: inherit; }
 .fleet-summary { padding: 20px 24px; border-bottom: 1px solid var(--border); }
 .fleet-summary .head { font-size: 22px; font-weight: 600; margin-top: 4px; }
 .fleet-summary .head .warn { color: var(--accent-2); font-weight: 500; font-size: 14px; margin-left: 10px; }
-.fleet-summary .layout-line { color: var(--soft); font-size: 12px; margin-top: 4px; }
-.fleet-summary .layout-line b { color: var(--ink); font-weight: 500; }
 
 .render-overlay { padding: 4px 9px; font-size: 11px; background: rgba(0,0,0,.55); border-color: rgba(255,255,255,.15); color: #fff; }
 .render-overlay:hover { background: rgba(0,0,0,.75); }

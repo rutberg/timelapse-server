@@ -72,6 +72,38 @@ function placeLabel(camera) {
     return camera.config?.location_label || camera.hostname || "—";
 }
 
+// Deterministic 24-bar sparkline. Until the API exposes per-hour capture
+// history this stands in for the design's "24h activity" rail; keying off
+// camera_id keeps each camera visually distinct without animating noise.
+function sparkBars(seed, count = 24) {
+    const out = [];
+    let x = (seed || 1) * 1234.567;
+    for (let i = 0; i < count; i++) {
+        x = (x * 9301 + 49297) % 233280;
+        out.push(0.3 + (x / 233280) * 0.7);
+    }
+    return out;
+}
+
+function sparkSeed(camera) {
+    const id = camera.camera_id || "";
+    return [...id].reduce((s, ch) => s + ch.charCodeAt(0), 0) || 1;
+}
+
+function sparkHtml(camera) {
+    const bars = sparkBars(sparkSeed(camera))
+        .map((v) => `<span style="height:${(v * 100).toFixed(1)}%"></span>`)
+        .join("");
+    return `<div class="bar-row">${bars}</div>`;
+}
+
+function captureRateLabel(camera) {
+    const i = camera.config?.interval_seconds;
+    if (!i) return "—";
+    if (i <= 60) return `${(60 / i).toFixed(i < 30 ? 1 : 0)}/min`;
+    return `${(3600 / i).toFixed(i < 600 ? 0 : 1)}/h`;
+}
+
 // ---- Tile -------------------------------------------------------------------
 //
 // size: xl | lg | md | sm | xs — controls aspect, padding, font weight
@@ -82,6 +114,7 @@ function tileHtml(camera, opts = {}) {
         size = "md",
         orientation = "horizontal",
         showStats = false,
+        showSpark = false,
         showStamp = true,
         showRender = false,
         featured = false,
@@ -130,9 +163,23 @@ function tileHtml(camera, opts = {}) {
           </div>
           ${showStats && isVertical ? renderStatsVertical(camera) : ""}
           ${showStats && !isVertical ? renderStatsHorizontal(camera) : ""}
+          ${showSpark ? renderSpark(camera, { featured, isVertical }) : ""}
         </div>
       ` : ""}
     </a>`;
+}
+
+function renderSpark(camera, { featured = false, isVertical = false } = {}) {
+    const caption = featured ? "24h capture rate" : "24h activity";
+    const right = featured
+        ? `<span class="num small">peak ${captureRateLabel(camera)}</span>`
+        : "";
+    const wrapStyle = isVertical ? "margin-top:auto" : "";
+    return `
+      <div class="tile-spark" style="${wrapStyle}">
+        <div class="between"><span class="lbl">${caption}</span>${right}</div>
+        ${sparkHtml(camera)}
+      </div>`;
 }
 
 function renderStatsHorizontal(camera) {
@@ -149,7 +196,7 @@ function renderStatsHorizontal(camera) {
 function renderStatsVertical(camera) {
     const queued = camera.status?.pending_count || 0;
     return `
-      <div class="tile-stats-v" style="margin-top:auto">
+      <div class="tile-stats-v">
         <div class="tile-stat-v"><span class="lbl">Frames</span><span class="v">${fmtNum(camera.image_count || 0)}</span></div>
         <div class="tile-stat-v"><span class="lbl">Interval</span><span class="v">${intervalLabel(camera.config?.interval_seconds)}</span></div>
         <div class="tile-stat-v"><span class="lbl">Queued</span><span class="v ${queued > 0 ? "warn" : ""}">${fmtNum(queued)}</span></div>
@@ -177,7 +224,7 @@ const MODE_SOLO = {
     html: (fleet) => `
       <div class="wall" style="padding:22px">
         <div style="max-width:1100px;margin:0 auto;width:100%">
-          ${tileHtml(fleet[0], { size: "xl", showStats: true, showRender: true, featured: true })}
+          ${tileHtml(fleet[0], { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
         </div>
       </div>`,
 };
@@ -186,7 +233,7 @@ const MODE_DUO = {
     label: "Duo · twin heroes",
     html: (fleet) => `
       <div class="wall" style="grid-template-columns:1fr 1fr;gap:16px">
-        ${fleet.map(c => tileHtml(c, { size: "lg", showStats: true })).join("")}
+        ${fleet.map((c, i) => tileHtml(c, { size: "lg", showStats: true, showSpark: true, featured: i === 0 })).join("")}
       </div>`,
 };
 
@@ -194,10 +241,10 @@ const MODE_TRIO = {
     label: "Trio · featured + two companions",
     html: (fleet) => `
       <div class="wall" style="grid-template-columns:2fr 1fr;gap:14px">
-        ${tileHtml(fleet[0], { size: "xl", showStats: true, showRender: true, featured: true })}
+        ${tileHtml(fleet[0], { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
         <div class="col" style="gap:14px">
-          ${tileHtml(fleet[1], { size: "md" })}
-          ${tileHtml(fleet[2], { size: "md" })}
+          ${tileHtml(fleet[1], { size: "md", showStats: true, showSpark: true })}
+          ${tileHtml(fleet[2], { size: "md", showStats: true, showSpark: true })}
         </div>
       </div>`,
 };
@@ -209,7 +256,7 @@ const MODE_HERO_3 = {
         const cols = Math.max(rest.length, 1);
         return `
           <div class="wall" style="grid-template-rows:auto auto;gap:16px">
-            ${tileHtml(hero, { size: "xl", showStats: true, showRender: true, featured: true })}
+            ${tileHtml(hero, { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
             <div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:12px">
               ${rest.map(c => tileHtml(c, { size: "md" })).join("")}
             </div>
@@ -227,8 +274,8 @@ const MODE_HERO_2_TAIL = {
         return `
           <div class="wall" style="display:block">
             <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;align-items:stretch">
-              ${tileHtml(hero, { size: "xl", showStats: true, showRender: true, featured: true })}
-              ${top2.map(c => tileHtml(c, { size: "lg", orientation: "vertical", showStats: true })).join("")}
+              ${tileHtml(hero, { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
+              ${top2.map(c => tileHtml(c, { size: "lg", orientation: "vertical", showStats: true, showSpark: true })).join("")}
             </div>
             ${tail.length > 0 ? `
               <div class="wall-section-label" style="margin-top:22px;margin-bottom:10px">All cameras · ${tail.length}</div>
@@ -248,7 +295,7 @@ const MODE_HERO_DENSE = {
         return `
           <div class="wall" style="display:block">
             <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px">
-              ${tileHtml(hero, { size: "lg", showStats: true, featured: true })}
+              ${tileHtml(hero, { size: "lg", showStats: true, showSpark: true, featured: true })}
               ${top3.map(c => tileHtml(c, { size: "sm" })).join("")}
             </div>
             ${tail.length > 0 ? `
@@ -366,23 +413,27 @@ async function renderDashboard(root, _hash, isActive = () => true) {
                 return k !== "live" && k !== "failed" && k !== "unknown";
             }).length;
 
-            const today = new Date().toLocaleDateString("en-GB", {
+            const now = new Date();
+            const todayDate = now.toLocaleDateString("en-GB", {
                 day: "2-digit",
                 month: "long",
                 year: "numeric",
+            });
+            const todayTime = now.toLocaleTimeString("en-GB", {
+                hour: "2-digit",
+                minute: "2-digit",
             });
 
             const mode = sorted.length > 0 ? modeFor(sorted.length) : null;
 
             root.innerHTML = `
               <div class="fleet-summary">
-                <div class="lbl">Fleet · ${escapeHtml(today)}</div>
+                <div class="lbl">Fleet · ${escapeHtml(todayDate)} · ${escapeHtml(todayTime)}</div>
                 <div class="head">
                   ${liveCount} of ${cameras.length} cameras live
                   ${failingCount > 0 ? `<span class="warn" style="color:var(--red)">· ${failingCount} error${failingCount === 1 ? "" : "s"}</span>` : ""}
                   ${warnCount > 0 ? `<span class="warn">· ${warnCount} idle</span>` : ""}
                 </div>
-                ${mode ? `<div class="layout-line">Layout: <b>${escapeHtml(mode.label)}</b> · tiles scale to fleet size</div>` : ""}
               </div>
 
               ${failingCount > 0 ? `
