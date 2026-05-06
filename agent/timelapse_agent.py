@@ -69,6 +69,11 @@ class AgentState:
     dslr_telemetry: Optional[Dict[str, Any]] = None
     last_reinit_token: Optional[str] = None
     last_init_at: Optional[str] = None
+    # Discovery (issue #13). last_discovery_token is the most recent token the
+    # agent has answered, so we don't re-run discovery every poll while the
+    # server hasn't refreshed `dslr_pending_discovery` yet.
+    last_discovery_token: Optional[str] = None
+    dslr_discovery: Optional[Dict[str, Any]] = None
 
 
 def next_allowed_hour(current_hour: int, capture_hours: list) -> int:
@@ -454,6 +459,11 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
     dslr_payload: Optional[Dict[str, Any]] = None
     if state.active_backend == "gphoto2":
         tel = state.dslr_telemetry or {}
+        # Legacy fields stay populated when the telemetry came from the
+        # Canon-flavoured (no prop_map) reader. With a prop_map the dict's
+        # keys are field slugs from the map; the `telemetry` slot carries
+        # those forward verbatim while the legacy fields stay None for any
+        # tile the body doesn't expose.
         dslr_payload = {
             "battery_level": tel.get("battery_level"),
             "available_shots": tel.get("available_shots"),
@@ -465,6 +475,7 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
             "current_values": state.dslr_current_values or {},
             "last_reinit_token": state.last_reinit_token,
             "last_init_at": state.last_init_at,
+            "telemetry": {k: v for k, v in tel.items() if v is not None},
         }
     payload = {
         "agent_version": AGENT_VERSION,
@@ -480,6 +491,7 @@ def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
         "signal_dbm": read_wifi_rssi(),
         "active_backend": state.active_backend,
         "dslr": dslr_payload,
+        "dslr_discovery": state.dslr_discovery,
     }
     try:
         post_json(url, payload)
@@ -746,10 +758,23 @@ _DSLR_CHOICE_KEYS: List[str] = [
 
 def gphoto2_read_choices_and_current(
     keys: Optional[List[str]] = None,
+    prop_map: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
-    """Read available choices and the current value for each setting in one pass."""
+    """Read available choices and the current value for each setting in one pass.
+
+    When `prop_map` is provided, we read both `read_key` and (when different)
+    `write_key` for each setting/init entry. The Nikon shutterspeed quirk is
+    why: `shutterspeed` is read-only with no choices, while `shutterspeed2`
+    holds the writable RADIO list. Without reading `shutterspeed2` here the
+    UI's `choices[d.read_key]` lookup would return an empty list and the
+    dropdown would degenerate to "leave as-is". After reading we alias each
+    write_key's choices back under the read_key so the UI stays simple.
+    """
     if keys is None:
-        keys = _DSLR_CHOICE_KEYS
+        if prop_map is not None:
+            keys = _prop_map_read_keys(prop_map)
+        else:
+            keys = _DSLR_CHOICE_KEYS
     choices: Dict[str, List[str]] = {}
     current_values: Dict[str, str] = {}
     for key in keys:
@@ -773,13 +798,44 @@ def gphoto2_read_choices_and_current(
             choices[key] = values
         if current is not None:
             current_values[key] = current
+    if prop_map is not None:
+        _alias_write_choices_to_read(prop_map, choices)
     return choices, current_values
 
 
-def gphoto2_read_current_values(keys: Optional[List[str]] = None) -> Dict[str, str]:
+def _alias_write_choices_to_read(
+    prop_map: Dict[str, Any], choices: Dict[str, List[str]]
+) -> None:
+    """For Nikon-style read/write splits, copy write_key's choices under
+    read_key when read_key has none. The UI looks up choices by read_key, so
+    without this aliasing the discovered shutter-speed control on Nikon
+    bodies would render with no options."""
+    for entry in (prop_map.get("setting_dropdowns") or []) + (
+        prop_map.get("init_keys") or []
+    ):
+        r, w = entry.get("read_key"), entry.get("write_key")
+        if not r or not w or r == w:
+            continue
+        if not choices.get(r) and choices.get(w):
+            choices[r] = choices[w]
+
+
+def gphoto2_read_choices(keys: List[str]) -> Dict[str, List[str]]:
+    """Choices-only convenience wrapper around gphoto2_read_choices_and_current."""
+    choices, _ = gphoto2_read_choices_and_current(keys)
+    return choices
+
+
+def gphoto2_read_current_values(
+    keys: Optional[List[str]] = None,
+    prop_map: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
     """Lightweight read of just the current value for each setting (no choices)."""
     if keys is None:
-        keys = _DSLR_CHOICE_KEYS
+        if prop_map is not None:
+            keys = _prop_map_read_keys(prop_map)
+        else:
+            keys = _DSLR_CHOICE_KEYS
     current: Dict[str, str] = {}
     for key in keys:
         val = _gphoto2_get_current(key)
@@ -788,8 +844,46 @@ def gphoto2_read_current_values(keys: Optional[List[str]] = None) -> Dict[str, s
     return current
 
 
-def gphoto2_apply_init_settings(dslr: Dict[str, Any]) -> None:
-    for field_name, gphoto_key in _DSLR_INIT_KEY_MAP.items():
+def _prop_map_read_keys(prop_map: Dict[str, Any]) -> List[str]:
+    """All gphoto2 keys we'd want choices/current for, given a property map.
+
+    Includes both `read_key` and `write_key` when they differ — the writable
+    name is where the choice list lives on Nikon (shutterspeed2), while the
+    read name carries the live current value.
+    """
+    keys: List[str] = []
+    seen: set = set()
+
+    def add(key: Optional[str]) -> None:
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+
+    for d in prop_map.get("setting_dropdowns") or []:
+        add(d.get("read_key"))
+        add(d.get("write_key"))
+    for k in prop_map.get("init_keys") or []:
+        add(k.get("read_key"))
+        add(k.get("write_key"))
+    return keys
+
+
+def gphoto2_apply_init_settings(
+    dslr: Dict[str, Any],
+    prop_map: Optional[Dict[str, Any]] = None,
+) -> None:
+    if prop_map is not None:
+        # Explicit empty list means "this body has no init keys" — that's
+        # different from "no map", and we must respect it (otherwise Sony
+        # bodies would get Canon-style writes that fail).
+        mapping = [
+            (k["settings_field"], k["write_key"])
+            for k in (prop_map.get("init_keys") or [])
+            if k.get("settings_field") and k.get("write_key")
+        ]
+    else:
+        mapping = list(_DSLR_INIT_KEY_MAP.items())
+    for field_name, gphoto_key in mapping:
         value = dslr.get(field_name)
         if value is None:
             continue
@@ -802,8 +896,19 @@ def gphoto2_apply_init_settings(dslr: Dict[str, Any]) -> None:
             logging.warning("Could not set DSLR init setting %s=%s: %s", gphoto_key, value, err)
 
 
-def gphoto2_apply_sequence_settings(dslr: Dict[str, Any]) -> None:
-    for field_name, gphoto_key in _DSLR_SEQUENCE_KEY_MAP.items():
+def gphoto2_apply_sequence_settings(
+    dslr: Dict[str, Any],
+    prop_map: Optional[Dict[str, Any]] = None,
+) -> None:
+    if prop_map is not None:
+        mapping = [
+            (d["settings_field"], d["write_key"])
+            for d in (prop_map.get("setting_dropdowns") or [])
+            if d.get("settings_field") and d.get("write_key")
+        ]
+    else:
+        mapping = list(_DSLR_SEQUENCE_KEY_MAP.items())
+    for field_name, gphoto_key in mapping:
         value = dslr.get(field_name)
         if value is None:
             continue
@@ -845,7 +950,34 @@ def _gphoto2_first_current(*keys: str) -> Optional[str]:
     return None
 
 
-def gphoto2_read_telemetry() -> Dict[str, Any]:
+def gphoto2_read_telemetry(
+    prop_map: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Read live telemetry values for the status card.
+
+    Legacy mode (`prop_map is None`) returns the fixed Canon-flavoured set of
+    keys we've always reported. With a property map, the returned dict's keys
+    are the tile `field` slugs from the map (so Sony bodies just don't get a
+    `battery_level` key, rather than reporting None).
+    """
+    if prop_map is not None:
+        result: Dict[str, Any] = {}
+        for tile in prop_map.get("telemetry_tiles") or []:
+            field = tile.get("field")
+            read_key = tile.get("read_key")
+            kind = tile.get("kind", "string")
+            if not field or not read_key:
+                continue
+            value = _gphoto2_get_current(read_key)
+            if value is None:
+                result[field] = None
+                continue
+            if kind == "int":
+                result[field] = int(value) if value.isdigit() else None
+            else:
+                result[field] = value
+        return result
+
     shots_str = _gphoto2_get_current("availableshots")
     counter_str = _gphoto2_get_current("shuttercounter")
     return {
@@ -856,6 +988,170 @@ def gphoto2_read_telemetry() -> Dict[str, Any]:
         "lens_name": _gphoto2_get_current("lensname"),
         "camera_model": _gphoto2_first_current("cameramodel", "model"),
     }
+
+
+def parse_list_all_config(stdout: str) -> Dict[str, Dict[str, Any]]:
+    """Parse `gphoto2 --list-all-config` stdout into a {path: entry} dict.
+
+    Mirrors the parser in `app.dslr_discovery` so the agent doesn't need a
+    server import. See that module for the format spec.
+    """
+    entries: Dict[str, Dict[str, Any]] = {}
+    current_path: Optional[str] = None
+    block: Dict[str, Any] = {}
+    choices: List[str] = []
+
+    def flush() -> None:
+        nonlocal block, choices
+        if current_path is not None:
+            entry = dict(block)
+            entry["choices"] = choices
+            entries[current_path] = entry
+        block = {}
+        choices = []
+
+    for raw in stdout.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        if line == "END":
+            flush()
+            current_path = None
+            continue
+        if line.startswith("/"):
+            flush()
+            current_path = line.strip()
+            continue
+        if current_path is None:
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key == "Label":
+            block["label"] = value
+        elif key == "Type":
+            block["type"] = value
+        elif key == "Readonly":
+            block["readonly"] = value not in ("0", "false", "False", "")
+        elif key == "Current":
+            block["current"] = value
+        elif key == "Choice":
+            parts = value.split(None, 1)
+            if len(parts) == 2:
+                choices.append(parts[1])
+    flush()
+    return entries
+
+
+def gphoto2_list_config(timeout: int = 30) -> Dict[str, Dict[str, Any]]:
+    """Run `gphoto2 --list-all-config` and return the parsed property tree."""
+    result = subprocess.run(
+        ["gphoto2", "--list-all-config"],
+        check=True, capture_output=True, text=True, timeout=timeout,
+    )
+    return parse_list_all_config(result.stdout)
+
+
+_VENDOR_PREFIXES = (
+    ("canon", "Canon"),
+    ("nikon", "Nikon"),
+    ("sony", "Sony"),
+    ("fuji", "Fuji"),
+    ("olympus", "Olympus"),
+    ("panasonic", "Panasonic"),
+)
+
+
+def parse_body_info(raw_config: Dict[str, Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    """Pick vendor / model / serial out of the parsed --list-all-config tree."""
+
+    def get(name: str) -> Optional[str]:
+        suffix = "/" + name
+        for path, entry in raw_config.items():
+            if path.endswith(suffix) and isinstance(entry, dict):
+                value = entry.get("current")
+                if value not in (None, ""):
+                    return str(value)
+        return None
+
+    manufacturer = get("manufacturer")
+    model = get("cameramodel") or get("model")
+    serial = get("eosserialnumber") or get("serialnumber")
+
+    vendor: Optional[str] = None
+    for source in (s for s in (manufacturer, model) if s):
+        lower = source.strip().lower()
+        for prefix, canonical in _VENDOR_PREFIXES:
+            if lower.startswith(prefix) or prefix in lower:
+                vendor = canonical
+                break
+        if vendor is not None:
+            break
+
+    return {"vendor": vendor, "model": model, "serial": serial}
+
+
+def post_discovery_result(
+    settings: Dict[str, Any],
+    token: str,
+    raw_config: Optional[Dict[str, Dict[str, Any]]] = None,
+    body: Optional[Dict[str, Optional[str]]] = None,
+    error: Optional[str] = None,
+) -> bool:
+    """Send the discovery callback to the server.
+
+    Returns True if the POST succeeded, False if it hit a transient HTTP /
+    network / timeout failure. Callers should only mark the token handled on
+    success; otherwise we'd strand the wizard waiting for a result we never
+    delivered.
+    """
+    url = (
+        settings["server_url"].rstrip("/")
+        + f"/api/cameras/{settings['camera_id']}/dslr/discovery/result"
+    )
+    payload: Dict[str, Any] = {"token": token}
+    if raw_config is not None:
+        payload["raw_config"] = raw_config
+    if body is not None:
+        payload["body"] = body
+    if error is not None:
+        payload["error"] = error
+    try:
+        post_json(url, payload)
+        return True
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
+        logging.warning("Discovery result POST failed: %s", err)
+        return False
+
+
+def run_dslr_discovery(
+    settings: Dict[str, Any], state: AgentState, token: str
+) -> None:
+    """Run `gphoto2 --list-all-config`, post the parsed tree to the server.
+
+    The token is only marked handled when the server has acknowledged our
+    callback. If the POST fails (transient network blip), we leave the token
+    unhandled so the next config poll retries — otherwise the wizard would
+    sit on "waiting for agent…" until its 5-minute timeout.
+    """
+    logging.info("Running DSLR discovery (token=%s)", token)
+    try:
+        tree = gphoto2_list_config()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError) as err:
+        logging.warning("DSLR discovery failed: %s", err)
+        if post_discovery_result(settings, token, error=str(err)):
+            state.last_discovery_token = token
+        return
+    body = parse_body_info(tree)
+    if post_discovery_result(settings, token, raw_config=tree, body=body):
+        state.last_discovery_token = token
+        logging.info(
+            "DSLR discovery posted: %d keys, vendor=%s model=%s",
+            len(tree), body.get("vendor"), body.get("model"),
+        )
 
 
 def measure_camera_pending(work_dir: Path) -> int:
@@ -1132,12 +1428,19 @@ def run_agent(settings: Dict[str, Any]) -> None:
     if active_backend == "gphoto2":
         gphoto2_disable_autopoweroff()
         dslr_config = remote_config.get("dslr") or {}
-        state.dslr_choices, state.dslr_current_values = gphoto2_read_choices_and_current()
+        prop_map = remote_config.get("dslr_property_map")
+        state.dslr_choices, state.dslr_current_values = gphoto2_read_choices_and_current(
+            prop_map=prop_map,
+        )
         if dslr_config:
-            gphoto2_apply_init_settings(dslr_config)
+            gphoto2_apply_init_settings(dslr_config, prop_map=prop_map)
             state.last_reinit_token = dslr_config.get("reinit_token")
             state.last_init_at = now_local_iso()
-            state.dslr_current_values = gphoto2_read_current_values()
+            state.dslr_current_values = gphoto2_read_current_values(prop_map=prop_map)
+        # Honor any discovery request that landed before the agent started.
+        pending = remote_config.get("dslr_pending_discovery")
+        if pending and pending.get("token") != state.last_discovery_token:
+            run_dslr_discovery(settings, state, pending["token"])
     state.pending_count, state.pending_bytes = measure_pending(work_dir)
     state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
@@ -1170,16 +1473,23 @@ def run_agent(settings: Dict[str, Any]) -> None:
             state.pending_count += measure_camera_pending(work_dir)
             if state.active_backend == "gphoto2":
                 dslr_config = remote_config.get("dslr") or {}
+                prop_map = remote_config.get("dslr_property_map")
                 new_token = dslr_config.get("reinit_token")
                 if new_token != state.last_reinit_token:
-                    gphoto2_apply_init_settings(dslr_config)
-                    state.dslr_choices, state.dslr_current_values = gphoto2_read_choices_and_current()
+                    gphoto2_apply_init_settings(dslr_config, prop_map=prop_map)
+                    state.dslr_choices, state.dslr_current_values = (
+                        gphoto2_read_choices_and_current(prop_map=prop_map)
+                    )
                     state.last_reinit_token = new_token
                     state.last_init_at = now_local_iso()
                     logging.info("DSLR re-initialized (token=%s)", new_token)
                 else:
-                    state.dslr_current_values = gphoto2_read_current_values()
-                state.dslr_telemetry = gphoto2_read_telemetry()
+                    state.dslr_current_values = gphoto2_read_current_values(prop_map=prop_map)
+                state.dslr_telemetry = gphoto2_read_telemetry(prop_map=prop_map)
+                # Run discovery if the server has set a fresh pending token.
+                pending = remote_config.get("dslr_pending_discovery")
+                if pending and pending.get("token") != state.last_discovery_token:
+                    run_dslr_discovery(settings, state, pending["token"])
             post_checkin(settings, state)
             if check_for_update(settings):
                 logging.info("Exiting to allow systemd restart")
@@ -1252,7 +1562,10 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = now + interval_seconds
         if enabled and in_schedule and now >= next_capture:
             if state.active_backend == "gphoto2":
-                gphoto2_apply_sequence_settings(remote_config.get("dslr") or {})
+                gphoto2_apply_sequence_settings(
+                    remote_config.get("dslr") or {},
+                    prop_map=remote_config.get("dslr_property_map"),
+                )
             try:
                 image_path = capture_frame(work_dir, remote_config)
                 state.last_capture_at = now_local_iso()

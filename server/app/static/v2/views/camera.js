@@ -157,6 +157,21 @@ async function renderCamera(root, hash, isActive = () => true) {
     let reinitDoneAt = null;
     let reinitErrorMsg = null;
 
+    // DSLR property-map discovery (issue #13).
+    // 'idle' = no in-flight discovery
+    // 'starting' = POST /dslr/discovery sent, waiting for token
+    // 'waiting' = token issued, waiting for the agent to call /discovery/result
+    // 'proposal-ready' = proposal fetched, awaiting user confirmation
+    // 'saving' = PUT /dslr/property_map in flight
+    // 'error' = network/agent error; see discoveryErrorMsg
+    let discoveryState = "idle";
+    let discoveryProposal = null;
+    let discoveryRawKeys = [];
+    let discoveryStatus = null;
+    let discoveryErrorMsg = null;
+    let discoveryPollTimer = null;
+    let discoveryDeadline = null; // ms epoch — gives up if agent never replies
+
     async function load() {
         try {
             const data = await api.fetchJson("/api/cameras");
@@ -1673,7 +1688,244 @@ async function renderCamera(root, hash, isActive = () => true) {
         return "";
     }
 
+    function discoveryButtonLabel() {
+        if (discoveryState === "starting") return "⏳ Requesting…";
+        if (discoveryState === "waiting") return "⏳ Waiting for agent…";
+        if (discoveryState === "saving") return "⏳ Saving…";
+        return "Run discovery";
+    }
+
+    function renderDiscoveryBanner() {
+        const inFlight =
+            discoveryState === "starting" || discoveryState === "waiting";
+        const lastError = discoveryStatus?.error || discoveryErrorMsg;
+        return `
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">DSLR setup needed</div>
+        <p style="margin-top:8px;font-size:13px;line-height:1.5">
+          We haven't profiled this camera yet. Run a one-time scan so we know
+          which controls and status tiles your camera body exposes.
+        </p>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+          <button class="btn primary" data-discover ${inFlight ? "disabled" : ""}>
+            ${escapeHtml(discoveryButtonLabel())}
+          </button>
+          ${lastError ? `<span class="small" style="color:var(--red)">${escapeHtml(lastError)}</span>` : ""}
+        </div>
+      </div></div>`;
+    }
+
+    function renderProposalRow(check, label, detail) {
+        const mark = check ? "✓" : " ";
+        const color = check ? "" : "color:var(--soft)";
+        return `<div style="font-family:var(--mono,monospace);${color}">
+          [<input type="checkbox" data-prop-row ${check ? "checked" : ""} ${check ? "" : "disabled"}/>${mark}]
+          ${escapeHtml(label)}
+          <span style="color:var(--soft);font-size:12px">${escapeHtml(detail)}</span>
+        </div>`;
+    }
+
+    function renderDiscoveryConfirmCard() {
+        if (!discoveryProposal) return "";
+        const body = discoveryProposal.body || {};
+        const tiles = discoveryProposal.telemetry_tiles || [];
+        const dropdowns = discoveryProposal.setting_dropdowns || [];
+        const initKeys = discoveryProposal.init_keys || [];
+
+        const tileOptions = [
+            { field: "battery", label: "Battery" },
+            { field: "available_shots", label: "Available shots" },
+            { field: "shutter_counter", label: "Shutter count" },
+            { field: "lens_name", label: "Lens" },
+            { field: "exposure_mode", label: "Exposure mode" },
+            { field: "camera_model", label: "Camera" },
+        ];
+        const tilesHtml = tileOptions
+            .map((opt) => {
+                const t = tiles.find((x) => x.field === opt.field);
+                return t
+                    ? renderProposalRow(true, opt.label, `(${t.read_key})`)
+                    : renderProposalRow(false, opt.label, "— not exposed by this body");
+            })
+            .join("");
+
+        const dropdownsHtml = dropdowns
+            .map((d) => {
+                const detail =
+                    d.read_key === d.write_key
+                        ? `(${d.read_key})`
+                        : `(read=${d.read_key}, write=${d.write_key})`;
+                return renderProposalRow(true, d.label, detail);
+            })
+            .join("");
+
+        const initHtml = initKeys
+            .map((k) => renderProposalRow(true, k.label, `(${k.read_key})`))
+            .join("");
+
+        const inFlight = discoveryState === "saving";
+        const totalKeys = (discoveryRawKeys || []).length;
+        const detected = body.model
+            ? `${escapeHtml(body.model)}${body.vendor ? ` (${escapeHtml(body.vendor)})` : ""}`
+            : "Camera";
+
+        return `
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">Confirm DSLR layout</div>
+        <p style="margin-top:6px;font-size:13px">
+          Detected: <strong>${detected}</strong>
+          <span style="color:var(--soft)">${totalKeys ? `(${totalKeys} properties found)` : ""}</span>
+        </p>
+        <div style="margin-top:10px;font-size:13px">
+          <div class="lbl" style="font-size:11px">Status tiles</div>
+          ${tilesHtml}
+        </div>
+        <div style="margin-top:14px;font-size:13px">
+          <div class="lbl" style="font-size:11px">Capture controls</div>
+          ${dropdownsHtml || `<div style="color:var(--soft)">— none discovered</div>`}
+        </div>
+        <div style="margin-top:14px;font-size:13px">
+          <div class="lbl" style="font-size:11px">Init keys</div>
+          ${initHtml || `<div style="color:var(--soft)">— none discovered</div>`}
+        </div>
+        <details style="margin-top:14px">
+          <summary class="small" style="cursor:pointer">Show all ${totalKeys} keys</summary>
+          <pre style="font-size:11px;max-height:200px;overflow:auto;background:var(--card-alt,#0001);padding:8px;border-radius:4px">${escapeHtml((discoveryRawKeys || []).join("\n"))}</pre>
+        </details>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+          <button class="btn primary" data-save-property-map ${inFlight ? "disabled" : ""}>
+            ${inFlight ? "⏳ Saving…" : "Save layout"}
+          </button>
+          <button class="btn" data-cancel-discovery>Discard</button>
+        </div>
+      </div></div>`;
+    }
+
+    // Field-id helper: same scheme is used both when rendering and when reading
+    // the user's selections back in `wireSettings` so the two stay in sync.
+    function dslrFieldId(settingsField) {
+        return `d-set-${settingsField}`;
+    }
+    function dslrInitId(settingsField) {
+        return `d-init-${settingsField}`;
+    }
+
+    function renderDslrSectionMapDriven(cfg, status, propMap) {
+        const dslrCfg = cfg.dslr || {};
+        const dslrSt = (status && status.dslr) || {};
+        const choices = dslrSt.choices || {};
+        const currentValues = dslrSt.current_values || {};
+        const tiles = propMap.telemetry_tiles || [];
+        const dropdowns = propMap.setting_dropdowns || [];
+        const initKeys = propMap.init_keys || [];
+        const reinitInFlight =
+            reinitPhase === "saving" || reinitPhase === "waiting";
+
+        // The agent posts a `telemetry` dict keyed by tile.field on bodies that
+        // ship with a property map. Older agents (no map) only populate the
+        // legacy slot-keyed fields, so we look in both places.
+        const tileValue = (tile) => {
+            const t = dslrSt.telemetry || {};
+            if (t[tile.field] != null) return t[tile.field];
+            // Legacy fallbacks per field name.
+            const legacy = {
+                battery: dslrSt.battery_level,
+                available_shots: dslrSt.available_shots,
+                shutter_counter: dslrSt.shutter_counter,
+                exposure_mode: dslrSt.exposure_mode,
+                lens_name: dslrSt.lens_name,
+                camera_model: dslrSt.camera_model,
+            };
+            return legacy[tile.field];
+        };
+
+        const formatTile = (tile, value) => {
+            if (value == null || value === "") return null;
+            if (tile.kind === "int") return Number(value).toLocaleString();
+            return escapeHtml(String(value));
+        };
+
+        const tileHtml = tiles
+            .map((tile) => {
+                const formatted = formatTile(tile, tileValue(tile));
+                if (formatted == null) return "";
+                return `<div><div class="lbl" style="font-size:11px">${escapeHtml(tile.label)}</div>${formatted}</div>`;
+            })
+            .filter(Boolean)
+            .join("");
+        const tileCount = (tileHtml.match(/<div><div class="lbl"/g) || []).length;
+        const lastInit = dslrSt.last_init_at
+            ? escapeHtml(relativeTime(dslrSt.last_init_at))
+            : "—";
+
+        const initHtml = initKeys.length
+            ? initKeys
+                  .map((k) => {
+                      const opts = (choices[k.read_key] || []).map(
+                          (v) =>
+                              `<option value="${escapeHtml(v)}" ${v === (currentValues[k.read_key] || dslrCfg[k.settings_field] || "") ? "selected" : ""}>${escapeHtml(v)}</option>`,
+                      ).join("");
+                      return `<label class="field"><span class="lbl">${escapeHtml(k.label)}</span><select class="input" id="${dslrInitId(k.settings_field)}"><option value="">— (leave as-is)</option>${opts}</select></label>`;
+                  })
+                  .join("")
+            : "";
+
+        const dropdownsHtml = dropdowns
+            .map((d) => {
+                const choiceList = choices[d.read_key] || [];
+                const selected =
+                    currentValues[d.read_key] || dslrCfg[d.settings_field] || "";
+                return dslrSelect(
+                    dslrFieldId(d.settings_field),
+                    d.label,
+                    d.read_key,
+                    choiceList,
+                    selected,
+                );
+            })
+            .join("");
+
+        const body = propMap.body || {};
+        const bodyLabel = body.model
+            ? `${escapeHtml(body.model)}${body.vendor ? ` <span style="color:var(--soft)">(${escapeHtml(body.vendor)})</span>` : ""}`
+            : "—";
+
+        return `
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">DSLR Status</div>
+        ${tileHtml ? `<div style="display:grid;grid-template-columns:repeat(${Math.min(tileCount, 4)},1fr);gap:8px;margin-top:12px;font-size:13px">${tileHtml}</div>` : ""}
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-top:10px;font-size:13px">
+          <div><div class="lbl" style="font-size:11px">Body</div>${bodyLabel}</div>
+          <div><div class="lbl" style="font-size:11px">Last initialized</div>${lastInit}</div>
+        </div>
+        <div style="margin-top:8px"><a class="small" href="#" data-rerun-discovery>Re-run discovery</a></div>
+      </div></div>
+
+      ${initKeys.length ? `
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">Camera Initialization</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
+          ${initHtml}
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+          <button class="btn" data-reinit ${reinitInFlight ? "disabled" : ""}>${reinitInFlight ? "⏳ Re-initializing…" : "Re-initialize"}</button>
+          <span class="small" id="reinit-msg">${reinitStatusHtml()}</span>
+        </div>
+      </div></div>` : ""}
+
+      ${dropdowns.length ? `
+      <div class="card" style="margin-top:14px"><div class="card-b">
+        <div class="lbl">Capture Settings</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
+          ${dropdownsHtml}
+        </div>
+      </div></div>` : ""}`;
+    }
+
     function renderDslrSection(cfg, status) {
+        if (cfg.dslr_property_map) {
+            return renderDslrSectionMapDriven(cfg, status, cfg.dslr_property_map);
+        }
         const dslrCfg = cfg.dslr || {};
         const dslrSt = (status && status.dslr) || {};
         const choices = dslrSt.choices || {};
@@ -1805,7 +2057,9 @@ async function renderCamera(root, hash, isActive = () => true) {
           </div>
         </div></div>
 
-        ${isGphoto2 ? renderDslrSection(cfg, camera.status) : ""}
+        ${isGphoto2 && !cfg.dslr_property_map && discoveryState !== "proposal-ready" ? renderDiscoveryBanner() : ""}
+        ${isGphoto2 && !cfg.dslr_property_map && discoveryState === "proposal-ready" ? renderDiscoveryConfirmCard() : ""}
+        ${isGphoto2 && cfg.dslr_property_map ? renderDslrSection(cfg, camera.status) : ""}
 
         <div class="row" style="margin-top:14px;gap:8px">
           <button class="btn primary" data-save-settings>Save settings</button>
@@ -1830,6 +2084,35 @@ async function renderCamera(root, hash, isActive = () => true) {
 
         function buildDslrPayload(withReinit) {
             const existing = (camera.config && camera.config.dslr) || {};
+            const propMap = camera.config && camera.config.dslr_property_map;
+            // With a property map, read from `d-init-${field}` and
+            // `d-set-${field}` ids and only include fields the map actually
+            // exposes — keeping unrelated fields as the saved value.
+            if (propMap) {
+                const payload = {
+                    capture_target: existing.capture_target || "Memory card",
+                    drive_mode: existing.drive_mode || "Single",
+                    focus_mode: existing.focus_mode || "Manual",
+                    shutterspeed: existing.shutterspeed || null,
+                    aperture: existing.aperture || null,
+                    iso: existing.iso || null,
+                    exposure_compensation: existing.exposure_compensation || null,
+                    whitebalance: existing.whitebalance || null,
+                    image_format: existing.image_format || null,
+                    reinit_token: withReinit
+                        ? new Date().toISOString()
+                        : existing.reinit_token || null,
+                };
+                for (const k of propMap.init_keys || []) {
+                    const v = selVal(`d-init-${k.settings_field}`);
+                    if (v !== null) payload[k.settings_field] = v;
+                }
+                for (const d of propMap.setting_dropdowns || []) {
+                    payload[d.settings_field] =
+                        selVal(`d-set-${d.settings_field}`);
+                }
+                return payload;
+            }
             return {
                 capture_target:
                     selVal("d-capturetarget") ||
@@ -1922,6 +2205,51 @@ async function renderCamera(root, hash, isActive = () => true) {
             });
         }
 
+        const discoverBtn = document.querySelector("[data-discover]");
+        if (discoverBtn) {
+            discoverBtn.addEventListener("click", () => startDiscovery());
+        }
+        const saveMapBtn = document.querySelector("[data-save-property-map]");
+        if (saveMapBtn) {
+            saveMapBtn.addEventListener("click", () => savePropertyMap());
+        }
+        const cancelDiscoveryBtn = document.querySelector(
+            "[data-cancel-discovery]",
+        );
+        if (cancelDiscoveryBtn) {
+            cancelDiscoveryBtn.addEventListener("click", () => {
+                discoveryState = "idle";
+                discoveryProposal = null;
+                discoveryRawKeys = [];
+                discoveryErrorMsg = null;
+                paint();
+            });
+        }
+        const rerunBtn = document.querySelector("[data-rerun-discovery]");
+        if (rerunBtn) {
+            rerunBtn.addEventListener("click", async (e) => {
+                e.preventDefault();
+                if (
+                    !confirm(
+                        "Re-run discovery? Your saved property map will be cleared.",
+                    )
+                )
+                    return;
+                try {
+                    await api.fetchJson(
+                        `/api/cameras/${encId}/dslr/property_map`,
+                        { method: "DELETE" },
+                    );
+                    camera.config = await api.fetchJson(
+                        `/api/cameras/${encId}/config`,
+                    );
+                    await startDiscovery();
+                } catch (err) {
+                    alert(err.message);
+                }
+            });
+        }
+
         document
             .querySelector("[data-delete-camera]")
             .addEventListener("click", () => {
@@ -1940,6 +2268,98 @@ async function renderCamera(root, hash, isActive = () => true) {
             });
     }
 
+    async function startDiscovery() {
+        discoveryErrorMsg = null;
+        discoveryState = "starting";
+        paint();
+        try {
+            await api.fetchJson(`/api/cameras/${encId}/dslr/discovery`, {
+                method: "POST",
+            });
+        } catch (e) {
+            discoveryState = "error";
+            discoveryErrorMsg = e.message;
+            paint();
+            return;
+        }
+        discoveryState = "waiting";
+        // Cap the wait at 5 minutes — agent poll interval is ~60s, so anything
+        // longer means the agent isn't running or isn't seeing the camera.
+        discoveryDeadline = Date.now() + 5 * 60 * 1000;
+        if (discoveryPollTimer) window.clearInterval(discoveryPollTimer);
+        discoveryPollTimer = window.setInterval(pollDiscoveryProposal, 5000);
+        paint();
+        // Kick off an immediate poll so users with fast agents don't wait 5s.
+        pollDiscoveryProposal();
+    }
+
+    async function pollDiscoveryProposal() {
+        let res;
+        try {
+            res = await api.fetchJson(
+                `/api/cameras/${encId}/dslr/discovery/proposal`,
+            );
+        } catch (e) {
+            // Network blip — keep waiting, the next tick will retry.
+            return;
+        }
+        const disc = res.discovery || {};
+        if (disc.error) {
+            discoveryState = "error";
+            discoveryErrorMsg = disc.error;
+            stopDiscoveryPoll();
+            paint();
+            return;
+        }
+        if (res.proposal) {
+            discoveryProposal = res.proposal;
+            discoveryRawKeys = res.raw_keys || [];
+            discoveryStatus = disc;
+            discoveryState = "proposal-ready";
+            stopDiscoveryPoll();
+            paint();
+            return;
+        }
+        if (Date.now() > (discoveryDeadline || 0)) {
+            discoveryState = "error";
+            discoveryErrorMsg =
+                "Timed out waiting for the agent to respond. Check the agent is running and a USB camera is connected.";
+            stopDiscoveryPoll();
+            paint();
+        }
+    }
+
+    function stopDiscoveryPoll() {
+        if (discoveryPollTimer) {
+            window.clearInterval(discoveryPollTimer);
+            discoveryPollTimer = null;
+        }
+    }
+
+    async function savePropertyMap() {
+        if (!discoveryProposal) return;
+        discoveryState = "saving";
+        paint();
+        try {
+            await api.fetchJson(`/api/cameras/${encId}/dslr/property_map`, {
+                method: "PUT",
+                body: JSON.stringify(discoveryProposal),
+            });
+            camera.config = await api.fetchJson(
+                `/api/cameras/${encId}/config`,
+            );
+            discoveryState = "idle";
+            discoveryProposal = null;
+            discoveryRawKeys = [];
+            discoveryErrorMsg = null;
+            paint();
+        } catch (e) {
+            discoveryState = "proposal-ready";
+            discoveryErrorMsg = e.message;
+            paint();
+        }
+    }
+
     await load();
     if (!isActive()) {
         return () => {
@@ -1952,6 +2372,7 @@ async function renderCamera(root, hash, isActive = () => true) {
     pollTimer = window.setInterval(load, 15000);
     return () => {
         if (pollTimer) window.clearInterval(pollTimer);
+        stopDiscoveryPoll();
         framesState.mounted = false;
         removeFrameGlobalListeners();
         const marquee = document.getElementById("frames-marquee");
