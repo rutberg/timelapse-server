@@ -1,0 +1,82 @@
+{
+  "_source": "Distilled from libgphoto2/camlibs/ptp2/cameras/sony-a7m4.txt. Notable absences: no batterylevel, no availableshots, no shuttercounter, no lensname under /main/status/. Aperture is f-number (Sony shares Nikon's PTP vocab); image format is imagequality; drive mode is capturemode; exposure mode is expprogram.",
+  "/main/status/manufacturer": {
+    "label": "Camera Manufacturer", "type": "TEXT", "readonly": true,
+    "current": "Sony Corporation", "choices": []
+  },
+  "/main/status/cameramodel": {
+    "label": "Camera Model", "type": "TEXT", "readonly": true,
+    "current": "ILCE-7M4", "choices": []
+  },
+  "/main/status/serialnumber": {
+    "label": "Serial Number", "type": "TEXT", "readonly": true,
+    "current": "ABC123DEF", "choices": []
+  },
+  "/main/settings/capturetarget": {
+    "label": "Capture Target", "type": "RADIO", "readonly": false,
+    "current": "card+sdram",
+    "choices": ["sdram", "card+sdram"]
+  },
+  "/main/imgsettings/iso": {
+    "label": "ISO Speed", "type": "RADIO", "readonly": false,
+    "current": "400",
+    "choices": ["AUTO", "50", "64", "80", "100", "125", "160", "200", "250",
+                "320", "400", "500", "640", "800", "1000", "1250", "1600",
+                "2000", "2500", "3200", "4000", "5000", "6400"]
+  },
+  "/main/imgsettings/whitebalance": {
+    "label": "WhiteBalance", "type": "RADIO", "readonly": false,
+    "current": "Auto WB",
+    "choices": ["Auto WB", "Daylight", "Shade", "Cloudy", "Incandescent",
+                "Fluorescent: Warm White", "Flash"]
+  },
+  "/main/capturesettings/shutterspeed": {
+    "label": "Shutter Speed", "type": "RADIO", "readonly": false,
+    "current": "125/10000",
+    "choices": ["bulb", "300/10", "240/10", "200/10", "150/10", "125/10",
+                "100/10", "80/10", "60/10", "50/10", "40/10", "30/10",
+                "25/10", "20/10", "15/10", "13/10", "10/10", "8/10",
+                "1/4", "1/5", "1/6", "1/8", "1/10", "1/13", "1/15", "1/20",
+                "1/25", "1/30", "1/40", "1/50", "1/60", "1/80", "1/100",
+                "1/125", "1/160", "1/200", "1/250", "1/320", "1/400",
+                "1/500", "1/640", "1/800", "1/1000", "1/1250", "1/1600",
+                "1/2000", "1/2500", "1/3200", "1/4000", "1/5000", "1/6400",
+                "1/8000"]
+  },
+  "/main/capturesettings/f-number": {
+    "label": "F-Number", "type": "RADIO", "readonly": false,
+    "current": "5.6",
+    "choices": ["1.8", "2", "2.2", "2.5", "2.8", "3.2", "3.5", "4", "4.5",
+                "5", "5.6", "6.3", "7.1", "8", "9", "10", "11", "13", "14",
+                "16", "18", "20", "22"]
+  },
+  "/main/capturesettings/exposurecompensation": {
+    "label": "Exposure Compensation", "type": "RADIO", "readonly": false,
+    "current": "0",
+    "choices": ["-5", "-4.7", "-4.3", "-4", "-3.7", "-3.3", "-3", "-2.7",
+                "-2.3", "-2", "-1.7", "-1.3", "-1", "-0.7", "-0.3", "0",
+                "0.3", "0.7", "1", "1.3", "1.7", "2", "2.3", "2.7", "3",
+                "3.3", "3.7", "4", "4.3", "4.7", "5"]
+  },
+  "/main/capturesettings/expprogram": {
+    "label": "Exposure Program", "type": "RADIO", "readonly": false,
+    "current": "M",
+    "choices": ["Intelligent Auto", "P", "A", "S", "M", "Movie", "Sweep Panorama"]
+  },
+  "/main/capturesettings/imagequality": {
+    "label": "Image Quality", "type": "RADIO", "readonly": false,
+    "current": "RAW+JPEG Fine",
+    "choices": ["RAW", "RAW+JPEG Fine", "Standard", "Fine", "Extra Fine"]
+  },
+  "/main/capturesettings/capturemode": {
+    "label": "Still Capture Mode", "type": "RADIO", "readonly": false,
+    "current": "Single Shot",
+    "choices": ["Single Shot", "Continuous Hi", "Continuous Lo", "Self-timer 10s",
+                "Self-timer 2s", "Bracket: 0.3EV 3 image"]
+  },
+  "/main/capturesettings/focusmode": {
+    "label": "Focus Mode", "type": "RADIO", "readonly": false,
+    "current": "Manual",
+    "choices": ["Manual", "AF-S", "AF-C", "DMF"]
+  }
+}

@@ -296,23 +296,24 @@ from timelapse_agent import capture_frame
 
 
 class TestCaptureFrameGphoto2Branch:
-    def test_gphoto2_capture_appends_to_queue_and_returns_ref(self, tmp_path):
+    def test_gphoto2_capture_writes_local_file(self, tmp_path):
+        # The agent uses `gphoto2 --capture-image-and-download` so the file
+        # lands on local disk immediately (works around Sony bodies that only
+        # keep the JPEG in camera RAM).
         config = {"camera_backend": "gphoto2"}
-        completed = MagicMock(
-            returncode=0,
-            stdout="New file is in location /a/b/IMG_99.CR3 on the camera\n",
-            stderr="",
-        )
+
+        def fake_run(cmd, **_kwargs):
+            # Simulate gphoto2 writing the temp file to --filename.
+            filename_arg = cmd[cmd.index("--filename") + 1]
+            Path(filename_arg).write_bytes(b"jpeg-bytes")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
         with patch("timelapse_agent.resolve_active_backend", return_value="gphoto2"), \
-             patch("timelapse_agent.subprocess.run", return_value=completed):
+             patch("timelapse_agent.subprocess.run", side_effect=fake_run):
             result = capture_frame(tmp_path, config)
-        assert isinstance(result, CameraFileRef)
-        assert result.filename == "IMG_99.CR3"
-        entries = load_camera_pending(tmp_path)
-        assert len(entries) == 1
-        assert entries[0]["filename"] == "IMG_99.CR3"
-        assert entries[0]["folder"] == "/a/b"
-        assert "captured_at" in entries[0]
+        assert isinstance(result, Path)
+        assert result.suffix == ".jpg"
+        assert result.parent == tmp_path / "pending"
 
     def test_rpicam_capture_path_unchanged(self, tmp_path):
         # When backend is rpicam, capture_frame should still write to pending/.

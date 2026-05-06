@@ -12,8 +12,9 @@ import tempfile
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 
 from fastapi import (
     BackgroundTasks,
@@ -79,6 +80,88 @@ class DslrStatus(BaseModel):
     current_values: Dict[str, str] = Field(default_factory=dict)
     last_reinit_token: Optional[str] = None
     last_init_at: Optional[str] = None
+    # Tile-keyed live values when the camera has a property map. Lets the UI
+    # render any vendor-specific telemetry tile (Sony "expprogram" etc.)
+    # without the server hardcoding a list of fields.
+    telemetry: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DslrTelemetryTile(BaseModel):
+    """One status-card tile in a discovered property map.
+
+    `field` is a stable snake_case slug (e.g. "battery", "available_shots",
+    "exposure_mode") used as the dict key in DslrStatus.telemetry.
+    `read_key` is the gphoto2 config name (e.g. "batterylevel").
+    """
+
+    field: str
+    label: str
+    read_key: str
+    kind: Literal["string", "int"] = "string"
+
+
+class DslrSettingDropdown(BaseModel):
+    """One capture-settings dropdown in a discovered property map.
+
+    `settings_field` matches a snake_case attribute on DslrSettings
+    (shutterspeed, aperture, iso, exposure_compensation, whitebalance,
+    image_format). Nikon needs `read_key != write_key` because its
+    `shutterspeed` is read-only and the writable name is `shutterspeed2`.
+    """
+
+    settings_field: str
+    label: str
+    read_key: str
+    write_key: str
+
+
+class DslrInitKey(BaseModel):
+    """One init-time setting (capturetarget / drivemode / focusmode)."""
+
+    settings_field: str
+    label: str
+    read_key: str
+    write_key: str
+
+
+class DslrBodyInfo(BaseModel):
+    vendor: Optional[str] = None
+    model: Optional[str] = None
+    serial: Optional[str] = None
+
+
+class DslrPropertyMap(BaseModel):
+    schema_version: int = 1
+    discovered_at: str
+    body: DslrBodyInfo = Field(default_factory=DslrBodyInfo)
+    telemetry_tiles: List[DslrTelemetryTile] = Field(default_factory=list)
+    setting_dropdowns: List[DslrSettingDropdown] = Field(default_factory=list)
+    init_keys: List[DslrInitKey] = Field(default_factory=list)
+
+
+class DslrPendingDiscovery(BaseModel):
+    token: str
+    requested_at: str
+
+
+class DslrDiscoveryStatus(BaseModel):
+    token: Optional[str] = None
+    requested_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error: Optional[str] = None
+    raw_keys_count: Optional[int] = None
+    body: Optional[DslrBodyInfo] = None
+
+
+# Raw `gphoto2 --list-all-config` entry. We keep both `current` and `choices`
+# (when the field is a RADIO/MENU) so the proposer can populate the UI's
+# dropdowns without bouncing back to the agent.
+class DslrRawConfigEntry(BaseModel):
+    label: Optional[str] = None
+    type: Optional[str] = None
+    readonly: bool = False
+    current: Optional[str] = None
+    choices: List[str] = Field(default_factory=list)
 
 
 class CameraConfig(BaseModel):
@@ -125,6 +208,8 @@ class CameraConfig(BaseModel):
         ),
     )
     dslr: Optional[DslrSettings] = None
+    dslr_property_map: Optional[DslrPropertyMap] = None
+    dslr_pending_discovery: Optional[DslrPendingDiscovery] = None
 
     @field_validator("camera_backend")
     @classmethod
@@ -229,6 +314,7 @@ class CameraStatus(BaseModel):
     signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
     active_backend: Optional[str] = None
     dslr: Optional[DslrStatus] = None
+    dslr_discovery: Optional[DslrDiscoveryStatus] = None
 
 
 class CameraRecord(BaseModel):
@@ -250,6 +336,27 @@ class CheckinRequest(BaseModel):
     signal_dbm: Optional[int] = Field(default=None, ge=-120, le=0)
     active_backend: Optional[str] = None
     dslr: Optional[DslrStatus] = None
+    dslr_discovery: Optional[DslrDiscoveryStatus] = None
+
+
+class DslrDiscoveryStartResponse(BaseModel):
+    token: str
+    requested_at: str
+
+
+class DslrDiscoveryResultRequest(BaseModel):
+    """Agent → server callback once `gphoto2 --list-all-config` is parsed."""
+
+    token: str
+    body: Optional[DslrBodyInfo] = None
+    raw_config: Dict[str, DslrRawConfigEntry] = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
+class DslrDiscoveryProposalResponse(BaseModel):
+    discovery: DslrDiscoveryStatus
+    proposal: Optional[DslrPropertyMap] = None
+    raw_keys: List[str] = Field(default_factory=list)
 
 
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}$")
@@ -996,6 +1103,8 @@ def post_checkin(
         status["active_backend"] = payload.active_backend
     if payload.dslr is not None:
         status["dslr"] = payload.dslr.model_dump()
+    if payload.dslr_discovery is not None:
+        status["dslr_discovery"] = payload.dslr_discovery.model_dump()
     status["last_error"] = payload.last_error
 
     cameras[camera_id] = record
@@ -1011,6 +1120,131 @@ def post_checkin(
         KeyArchive(DATA_DIR).archive_private_key(camera_id)
 
     return {"acknowledged": True, "last_seen": now_iso}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _require_camera_record(camera_id: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    camera_id = safe_identifier(camera_id)
+    store = load_store()
+    cameras = store.setdefault("cameras", {})
+    record = cameras.setdefault(camera_id, model_dict(CameraRecord()))
+    record.setdefault("config", model_dict(CameraConfig()))
+    record.setdefault("status", model_dict(CameraStatus()))
+    return camera_id, store, record
+
+
+@app.post("/api/cameras/{camera_id}/dslr/discovery")
+def start_dslr_discovery(camera_id: str) -> DslrDiscoveryStartResponse:
+    """Mint a discovery token and stash it on the camera config so the agent
+    picks it up on its next /config poll."""
+    camera_id, store, record = _require_camera_record(camera_id)
+    token = uuid4().hex
+    requested_at = _now_iso()
+    pending = {"token": token, "requested_at": requested_at}
+    record["config"]["dslr_pending_discovery"] = pending
+    record["status"]["dslr_discovery"] = {
+        "token": token,
+        "requested_at": requested_at,
+        "completed_at": None,
+        "error": None,
+        "raw_keys_count": None,
+        "body": None,
+    }
+    save_store(store)
+    return DslrDiscoveryStartResponse(token=token, requested_at=requested_at)
+
+
+@app.post("/api/cameras/{camera_id}/dslr/discovery/result")
+def post_dslr_discovery_result(
+    camera_id: str,
+    payload: DslrDiscoveryResultRequest,
+) -> Dict[str, Any]:
+    """Agent callback once `gphoto2 --list-all-config` has run.
+
+    Stores the raw key tree on the camera record, runs the proposer, and
+    clears `dslr_pending_discovery` so the agent doesn't re-run on its next
+    poll. The proposer output lives on `camera.status.dslr_discovery_proposal`
+    until the user confirms it via PUT /dslr/property_map.
+    """
+    from app.dslr_discovery import propose_property_map
+
+    camera_id, store, record = _require_camera_record(camera_id)
+    pending = (record["config"] or {}).get("dslr_pending_discovery")
+    if pending is None or pending.get("token") != payload.token:
+        # Stale or unknown token; ignore but acknowledge so the agent stops
+        # retrying. This also covers the user re-running discovery before the
+        # previous result lands.
+        return {"acknowledged": True, "stale": True}
+
+    completed_at = _now_iso()
+    raw_dict = {
+        path: entry.model_dump() for path, entry in payload.raw_config.items()
+    }
+    body_dict = payload.body.model_dump() if payload.body is not None else None
+
+    proposal: Optional[Dict[str, Any]] = None
+    if payload.error is None and raw_dict:
+        proposal = propose_property_map(
+            raw_dict, discovered_at=completed_at, body_info=body_dict
+        )
+
+    record["config"]["dslr_pending_discovery"] = None
+    record["status"]["dslr_discovery"] = {
+        "token": payload.token,
+        "requested_at": (pending or {}).get("requested_at"),
+        "completed_at": completed_at,
+        "error": payload.error,
+        "raw_keys_count": len(raw_dict) if raw_dict else None,
+        "body": body_dict,
+    }
+    record["dslr_raw_config"] = raw_dict if raw_dict else None
+    record["dslr_property_map_proposal"] = proposal
+    save_store(store)
+
+    return {"acknowledged": True, "stale": False, "completed_at": completed_at}
+
+
+@app.get("/api/cameras/{camera_id}/dslr/discovery/proposal")
+def get_dslr_discovery_proposal(camera_id: str) -> DslrDiscoveryProposalResponse:
+    """Fetch the latest proposal + discovery state for the wizard UI."""
+    camera_id, _store, record = _require_camera_record(camera_id)
+    discovery_dict = (record["status"] or {}).get("dslr_discovery") or {}
+    proposal_dict = record.get("dslr_property_map_proposal")
+    raw = record.get("dslr_raw_config") or {}
+    return DslrDiscoveryProposalResponse(
+        discovery=DslrDiscoveryStatus(**discovery_dict),
+        proposal=DslrPropertyMap(**proposal_dict) if proposal_dict else None,
+        raw_keys=sorted(raw.keys()),
+    )
+
+
+@app.put("/api/cameras/{camera_id}/dslr/property_map")
+def put_dslr_property_map(
+    camera_id: str,
+    property_map: DslrPropertyMap,
+) -> DslrPropertyMap:
+    """Persist a property map edited by the user (or accepted as-proposed)."""
+    camera_id, store, record = _require_camera_record(camera_id)
+    record["config"]["dslr_property_map"] = property_map.model_dump()
+    # Once accepted, the proposal slot can be cleared.
+    record.pop("dslr_property_map_proposal", None)
+    save_store(store)
+    return property_map
+
+
+@app.delete("/api/cameras/{camera_id}/dslr/property_map", status_code=204)
+def delete_dslr_property_map(camera_id: str) -> None:
+    """Wipe the saved property map so the wizard can re-run."""
+    camera_id, store, record = _require_camera_record(camera_id)
+    record["config"]["dslr_property_map"] = None
+    record.pop("dslr_raw_config", None)
+    record.pop("dslr_property_map_proposal", None)
+    record["status"]["dslr_discovery"] = None
+    save_store(store)
+    return None
 
 
 @app.delete("/api/cameras/{camera_id}", status_code=204)

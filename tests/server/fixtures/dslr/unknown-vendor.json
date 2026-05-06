@@ -1,0 +1,21 @@
+{
+  "_source": "Synthetic minimal fixture for an unsupported vendor — verifies the proposer doesn't crash and produces a sane minimal map (Camera + ISO + WhiteBalance only).",
+  "/main/status/manufacturer": {
+    "label": "Camera Manufacturer", "type": "TEXT", "readonly": true,
+    "current": "Hasselblad", "choices": []
+  },
+  "/main/status/cameramodel": {
+    "label": "Camera Model", "type": "TEXT", "readonly": true,
+    "current": "X1D II 50C", "choices": []
+  },
+  "/main/imgsettings/iso": {
+    "label": "ISO Speed", "type": "RADIO", "readonly": false,
+    "current": "400",
+    "choices": ["100", "200", "400", "800"]
+  },
+  "/main/imgsettings/whitebalance": {
+    "label": "WhiteBalance", "type": "RADIO", "readonly": false,
+    "current": "Auto",
+    "choices": ["Auto", "Daylight"]
+  }
+}
