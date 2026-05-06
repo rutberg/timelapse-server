@@ -97,6 +97,43 @@ function sparkHtml(camera) {
     return `<div class="bar-row">${bars}</div>`;
 }
 
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function daysLabel(days) {
+    if (!days || days.length === 0 || days.length === 7) return null;
+    const sorted = [...days].sort((a, b) => a - b);
+    if (sorted.join(",") === "1,2,3,4,5") return "Mon – Fri";
+    if (sorted.join(",") === "6,7") return "Sat – Sun";
+    const isRange = sorted.every((d, i) => i === 0 || d === sorted[i - 1] + 1);
+    if (isRange) return `${DAY_NAMES[sorted[0] - 1]} – ${DAY_NAMES[sorted[sorted.length - 1] - 1]}`;
+    return sorted.map(d => DAY_NAMES[d - 1]).join(", ");
+}
+
+function hoursLabel(hours) {
+    if (!hours || hours.length === 0) return null;
+    const sorted = [...hours].sort((a, b) => a - b);
+    const pad = n => String(n).padStart(2, "0");
+    return `${pad(sorted[0])}:00 – ${pad(sorted[sorted.length - 1])}:00`;
+}
+
+function scheduleLabel(camera) {
+    const cfg = camera.config;
+    const interval = intervalLabel(cfg?.interval_seconds);
+    const mode = cfg?.schedule_mode;
+    const days = daysLabel(cfg?.schedule_days);
+    let main;
+    if (mode === "scene") {
+        main = `every ${interval} @ Ȳ ≥ ${cfg.light_threshold ?? "?"}`;
+    } else if (mode === "hours" && cfg?.capture_hours?.length) {
+        main = `${hoursLabel(cfg.capture_hours)} · every ${interval}`;
+    } else if (mode === "daylight") {
+        main = `every ${interval} (daylight)`;
+    } else {
+        main = `every ${interval}`;
+    }
+    return days ? `${main} · ${days}` : main;
+}
+
 function captureRateLabel(camera) {
     const i = camera.config?.interval_seconds;
     if (!i) return "—";
@@ -138,7 +175,7 @@ function tileHtml(camera, opts = {}) {
 
     const subText = compact && !isVertical
         ? `${fmtNum(camera.image_count || 0)} · ${intervalLabel(camera.config?.interval_seconds)}`
-        : `${escapeHtml(placeLabel(camera))} · every ${intervalLabel(camera.config?.interval_seconds)}`;
+        : `${escapeHtml(placeLabel(camera))} · ${scheduleLabel(camera)}`;
 
     const showMeta = !(size === "xs" && opts.showMeta === false);
 
@@ -155,11 +192,13 @@ function tileHtml(camera, opts = {}) {
         <div class="tile-meta">
           <div class="between" style="align-items:flex-start">
             <div class="grow" style="min-width:0">
-              <div class="tile-name">${escapeHtml(display)}</div>
+              <div style="display:flex;align-items:center;gap:4px">
+                <div class="tile-name">${escapeHtml(display)}</div>
+                ${size !== "xs" ? `<button class="tile-star${featured ? " on" : ""}" data-feature-cam="${id}" data-featured="${featured ? "1" : ""}">${icon("star", compact ? 10 : 12)}</button>` : ""}
+              </div>
               <div class="tile-sub">${subText}</div>
               ${note && (!compact || isVertical) ? `<div class="tile-note ${noteKind || "warn"}">${escapeHtml(note)}</div>` : ""}
             </div>
-            ${featured ? `<div class="tile-featured">Featured</div>` : ""}
           </div>
           ${showStats && isVertical ? renderStatsVertical(camera) : ""}
           ${showStats && !isVertical ? renderStatsHorizontal(camera) : ""}
@@ -224,7 +263,7 @@ const MODE_SOLO = {
     html: (fleet) => `
       <div class="wall" style="padding:22px">
         <div style="max-width:1100px;margin:0 auto;width:100%">
-          ${tileHtml(fleet[0], { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
+          ${tileHtml(fleet[0], { size: "xl", showStats: true, showSpark: true, showRender: true, featured: !!fleet[0].config?.featured_at })}
         </div>
       </div>`,
 };
@@ -233,7 +272,7 @@ const MODE_DUO = {
     label: "Duo · twin heroes",
     html: (fleet) => `
       <div class="wall" style="grid-template-columns:1fr 1fr;gap:16px">
-        ${fleet.map((c, i) => tileHtml(c, { size: "lg", showStats: true, showSpark: true, featured: i === 0 })).join("")}
+        ${fleet.map((c) => tileHtml(c, { size: "lg", showStats: true, showSpark: true, featured: !!c.config?.featured_at })).join("")}
       </div>`,
 };
 
@@ -241,10 +280,10 @@ const MODE_TRIO = {
     label: "Trio · featured + two companions",
     html: (fleet) => `
       <div class="wall" style="grid-template-columns:2fr 1fr;gap:14px">
-        ${tileHtml(fleet[0], { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
+        ${tileHtml(fleet[0], { size: "xl", showStats: true, showSpark: true, showRender: true, featured: !!fleet[0].config?.featured_at })}
         <div class="col" style="gap:14px">
-          ${tileHtml(fleet[1], { size: "md", showStats: true, showSpark: true })}
-          ${tileHtml(fleet[2], { size: "md", showStats: true, showSpark: true })}
+          ${tileHtml(fleet[1], { size: "md", showStats: true, showSpark: true, featured: !!fleet[1].config?.featured_at })}
+          ${tileHtml(fleet[2], { size: "md", showStats: true, showSpark: true, featured: !!fleet[2].config?.featured_at })}
         </div>
       </div>`,
 };
@@ -256,9 +295,9 @@ const MODE_HERO_3 = {
         const cols = Math.max(rest.length, 1);
         return `
           <div class="wall" style="grid-template-rows:auto auto;gap:16px">
-            ${tileHtml(hero, { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
+            ${tileHtml(hero, { size: "xl", showStats: true, showSpark: true, showRender: true, featured: !!hero.config?.featured_at })}
             <div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:12px">
-              ${rest.map(c => tileHtml(c, { size: "md" })).join("")}
+              ${rest.map(c => tileHtml(c, { size: "md", featured: !!c.config?.featured_at })).join("")}
             </div>
           </div>`;
     },
@@ -274,8 +313,8 @@ const MODE_HERO_2_TAIL = {
         return `
           <div class="wall" style="display:block">
             <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;align-items:stretch">
-              ${tileHtml(hero, { size: "xl", showStats: true, showSpark: true, showRender: true, featured: true })}
-              ${top2.map(c => tileHtml(c, { size: "lg", orientation: "vertical", showStats: true, showSpark: true })).join("")}
+              ${tileHtml(hero, { size: "xl", showStats: true, showSpark: true, showRender: true, featured: !!hero.config?.featured_at })}
+              ${top2.map(c => tileHtml(c, { size: "lg", orientation: "vertical", showStats: true, showSpark: true, featured: !!c.config?.featured_at })).join("")}
             </div>
             ${tail.length > 0 ? `
               <div class="wall-section-label" style="margin-top:22px;margin-bottom:10px">All cameras · ${tail.length}</div>
@@ -295,8 +334,8 @@ const MODE_HERO_DENSE = {
         return `
           <div class="wall" style="display:block">
             <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px">
-              ${tileHtml(hero, { size: "lg", showStats: true, showSpark: true, featured: true })}
-              ${top3.map(c => tileHtml(c, { size: "sm" })).join("")}
+              ${tileHtml(hero, { size: "lg", showStats: true, showSpark: true, featured: !!hero.config?.featured_at })}
+              ${top3.map(c => tileHtml(c, { size: "sm", featured: !!c.config?.featured_at })).join("")}
             </div>
             ${tail.length > 0 ? `
               <div class="wall-section-label" style="margin-top:18px;margin-bottom:10px">Tail · ${tail.length}</div>
@@ -365,10 +404,15 @@ function renderEmpty() {
     </div>`;
 }
 
-// ---- Sort: warnings/errors first, then by frame count ----------------------
+// ---- Sort: featured first (newest featured = slot 1), then status/frames ---
 function sortFleet(cameras) {
     const rank = { failed: 0, warn: 1, live: 2, paused: 3, offline: 4, unknown: 5 };
     return [...cameras].sort((a, b) => {
+        const aFeat = a.config?.featured_at || null;
+        const bFeat = b.config?.featured_at || null;
+        if (aFeat && !bFeat) return -1;
+        if (!aFeat && bFeat) return 1;
+        if (aFeat && bFeat) return bFeat.localeCompare(aFeat); // newer = lower index
         const r = (rank[statusKind(a.status)] ?? 9) - (rank[statusKind(b.status)] ?? 9);
         if (r !== 0) return r;
         return (b.image_count || 0) - (a.image_count || 0);
@@ -468,6 +512,23 @@ async function renderDashboard(root, _hash, isActive = () => true) {
                     const camId = decodeURIComponent(btn.dataset.renderCam);
                     const { openRenderModal } = await import("/static/v2/views/library.js");
                     openRenderModal(camId);
+                });
+            });
+
+            // Featured star toggles on dashboard tiles.
+            root.querySelectorAll("[data-feature-cam]").forEach((btn) => {
+                btn.addEventListener("click", async (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const camId = decodeURIComponent(btn.dataset.featureCam);
+                    const featured = !btn.dataset.featured;
+                    try {
+                        await api.fetchJson(
+                            `/api/cameras/${encodeURIComponent(camId)}/feature`,
+                            { method: "POST", body: JSON.stringify({ featured }) },
+                        );
+                        await load();
+                    } catch (_) {}
                 });
             });
 

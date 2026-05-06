@@ -183,6 +183,9 @@ input, select, textarea { font-family: inherit; }
 .tile-stat-v .v.warn { color: var(--accent-2); }
 
 .tile-featured { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--soft); flex-shrink: 0; margin-left: 8px; }
+.tile-star { background: none; border: none; padding: 2px; margin-left: auto; cursor: pointer; color: var(--soft); flex-shrink: 0; display: flex; align-items: center; opacity: 0.4; transition: opacity .15s, color .15s; }
+.tile-star:hover, .tile-star.on { opacity: 1; }
+.tile-star.on { color: var(--accent-2); }
 
 /* 24h sparkline — deterministic stand-in until the API exposes per-hour history. */
 .tile-spark { margin-top: 14px; }
