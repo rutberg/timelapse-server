@@ -126,8 +126,77 @@ input, select, textarea { font-family: inherit; }
 /* Procedural skies for placeholder thumbnails */
 .scene-day { background: linear-gradient(to bottom, #6a8aab 0%, #a8b6b8 55%, #4a5848 56%, #2e3a2a 100%); }
 .scene-dusk { background: linear-gradient(to bottom, #2a3148 0%, #c47c4a 45%, #6a4a30 56%, #1a1f1a 100%); }
+.scene-dawn { background: linear-gradient(to bottom, #2a3148 0%, #d99466 35%, #b56a44 50%, #2c3528 56%, #1a1f12 100%); }
 .scene-overcast { background: linear-gradient(to bottom, #b9bdc4 0%, #989ba1 50%, #4a5048 56%, #2c322a 100%); }
 .scene-night { background: linear-gradient(to bottom, #0a0c14 0%, #1a1f2c 60%, #0a0c10 100%); }
+.scene-snow { background: linear-gradient(to bottom, #c4cdd6 0%, #e1e4e8 50%, #d8dadd 56%, #b4b8be 100%); }
+.scene-fog { background: linear-gradient(to bottom, #aab4bc 0%, #cdd2d6 60%, #888d92 100%); }
+.scene-water { background: linear-gradient(to bottom, #4d7a9e 0%, #7196b5 40%, #2a4a68 50%, #1c3148 100%); }
+
+/* Solid pill variant — translucent overlay used on top of camera images. */
+.pill.solid { background: rgba(0,0,0,.55); border-color: rgba(255,255,255,.12); backdrop-filter: blur(6px); color: var(--ink); }
+.pill.solid.live { color: var(--green); }
+.pill.solid.warn { color: var(--accent-2); }
+.pill.solid.bad { color: var(--red); }
+
+/* Adaptive dashboard tiles ----------------------------------------------------
+   Tiles scale with fleet size: bigger tiles get extra chrome (stat strip),
+   tiny tiles drop the metadata strip and rely on the image alone. */
+.tile { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; cursor: pointer; transition: transform .18s ease, border-color .12s; text-decoration: none; color: inherit; }
+.tile:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+.tile.vertical { height: 100%; }
+.tile-image { position: relative; flex-shrink: 0; aspect-ratio: 16/9; background: linear-gradient(135deg, #2a2e35, #1c1f24); overflow: hidden; }
+.tile-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tile-image .placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--softer); font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; }
+.tile.size-xl .tile-image { aspect-ratio: 16 / 8; }
+.tile.size-md .tile-image { aspect-ratio: 16 / 9; }
+.tile.size-sm .tile-image, .tile.size-xs .tile-image { aspect-ratio: 4 / 3; }
+.tile.vertical .tile-image { aspect-ratio: 4 / 5; }
+.tile.size-lg.vertical .tile-image { aspect-ratio: 3 / 4; }
+
+.tile-image .tl { position: absolute; top: 8px; left: 8px; z-index: 2; display: flex; gap: 6px; }
+.tile-image .tr { position: absolute; top: 8px; right: 8px; z-index: 2; }
+.tile-image .bl { position: absolute; bottom: 10px; left: 10px; z-index: 2; }
+.tile-image .br { position: absolute; bottom: 12px; right: 12px; z-index: 2; }
+
+.tile-meta { padding: 10px 12px; display: flex; flex-direction: column; gap: 0; }
+.tile.compact .tile-meta { padding: 7px 9px; }
+.tile.vertical .tile-meta { flex: 1; gap: 10px; }
+.tile-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile.compact .tile-name { font-size: 12px; font-weight: 500; }
+.tile.size-lg .tile-name { font-size: 16px; }
+.tile.size-xl .tile-name { font-size: 20px; }
+.tile-sub { font-family: var(--mono); font-size: 11px; color: var(--soft); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile.compact .tile-sub { font-size: 10px; }
+.tile-note { font-size: 12px; margin-top: 4px; }
+.tile-note.warn { color: var(--accent-2); }
+.tile-note.bad { color: var(--red); }
+
+.tile-stats-h { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.tile-stat-h .lbl { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--soft); }
+.tile-stat-h .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink); margin-top: 3px; }
+.tile-stat-h .v.warn { color: var(--accent-2); }
+
+.tile-stats-v { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding-top: 8px; border-top: 1px solid var(--border); }
+.tile-stat-v { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tile-stat-v .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink); }
+.tile-stat-v .v.warn { color: var(--accent-2); }
+
+.tile-featured { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--soft); flex-shrink: 0; margin-left: 8px; }
+
+/* Adaptive walls — outer container, then mode-specific grids set inline. */
+.wall { padding: 22px; display: grid; gap: 16px; }
+.wall .wall-section-label { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--soft); margin-top: 6px; }
+
+/* Headline summary above the wall. */
+.fleet-summary { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+.fleet-summary .head { font-size: 22px; font-weight: 600; margin-top: 4px; }
+.fleet-summary .head .warn { color: var(--accent-2); font-weight: 500; font-size: 14px; margin-left: 10px; }
+.fleet-summary .layout-line { color: var(--soft); font-size: 12px; margin-top: 4px; }
+.fleet-summary .layout-line b { color: var(--ink); font-weight: 500; }
+
+.render-overlay { padding: 4px 9px; font-size: 11px; background: rgba(0,0,0,.55); border-color: rgba(255,255,255,.15); color: #fff; }
+.render-overlay:hover { background: rgba(0,0,0,.75); }
 
 /* Schedule control */
 .sched-track { position: relative; height: 56px; border-radius: 4px; border: 1px solid var(--border); overflow: hidden; }
