@@ -41,8 +41,8 @@ The UI is served from `/static/` and uses Alpine.js + pico.css. Both are vendore
 On a fresh Debian installation, you can install the server with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rutberg/timelapse/main/scripts/install-server.sh \
-  | sudo env TIMELAPSE_REPO_URL=https://github.com/rutberg/timelapse bash
+curl -fsSL https://raw.githubusercontent.com/rutberg/timelapse-server/main/scripts/install-server.sh \
+  | sudo env TIMELAPSE_REPO_URL=https://github.com/rutberg/timelapse-server bash
 ```
 
 The installer will:
@@ -215,7 +215,24 @@ The DSLR section in the camera Settings tab (`server/app/static/v2/views/camera.
 
 ## Security Note
 
-By default, the server is configured to only allow connections from the local network. Ensure `TIMELAPSE_ALLOWED_NETWORKS` in your server environment file correctly reflects your LAN setup.
+This project is designed for use on a trusted LAN — typically a home or studio network where every device on-link is already trusted. It is **not** hardened for direct exposure to the public internet.
+
+### Threat model
+
+- **No built-in authentication.** The HTTP API and web UI have no login, session, or per-user access control. Any client that can reach the bind address can capture, configure cameras, or trigger provisioning. Access control is delegated entirely to the network layer via `TIMELAPSE_ALLOWED_NETWORKS` (a CIDR allowlist enforced as middleware) and `TIMELAPSE_BIND_HOST`.
+- **LAN-only deployment.** The defaults bind to LAN interfaces and reject requests outside the configured CIDR. Do not port-forward the server, place it behind a public reverse proxy, or expose it via tunnel without adding your own authentication layer (e.g. a reverse proxy with HTTP basic auth, mTLS, Tailscale, or a VPN).
+- **Agents trust the server.** Pi agents pull configuration and (optionally) self-update from the server they are paired with. A compromised or impersonated server can push arbitrary commands or code to every paired agent. Keep the server host trustworthy and the LAN segment closed.
+- **First-time SSH provisioning uses `StrictHostKeyChecking=accept-new`.** When you provision a fresh Pi from the web UI, the server connects over SSH and trusts the host key on first contact (TOFU). This is convenient on a known-good LAN but means a man-in-the-middle on the LAN during initial provisioning could substitute their own host key. Provision agents on a network you control; subsequent connections verify the pinned key.
+- **Sudo password handling.** Provisioning may collect a sudo password to install the agent on the Pi. It is held in memory for the duration of the SSH session and is not persisted to disk. Reset/rotate after provisioning if your threat model requires it.
+
+### Recommended hardening
+
+- Keep `TIMELAPSE_ALLOWED_NETWORKS` as narrow as possible (specific CIDRs, not `0.0.0.0/0`).
+- Bind to a specific interface (`TIMELAPSE_BIND_HOST=192.168.x.y`) rather than `0.0.0.0` if multiple networks are reachable.
+- If remote access is needed, front the server with a reverse proxy that adds authentication, or reach it over Tailscale/WireGuard rather than opening a public port.
+- Provision agents over a quiet, trusted LAN segment.
+
+If you find a security issue, please follow the disclosure process in [SECURITY.md](SECURITY.md).
 
 ---
 
