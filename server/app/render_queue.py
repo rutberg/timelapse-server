@@ -48,6 +48,14 @@ class RenderRunner:
         self._current_id: Optional[str] = None
         self._current_proc: Optional[asyncio.subprocess.Process] = None
 
+    def enqueue(self, job: JobState) -> int:
+        if job.id in self._jobs:
+            raise ValueError(f"duplicate job id: {job.id}")
+        self._jobs[job.id] = job
+        self._order.append(job.id)
+        self._queue.put_nowait(job.id)
+        return len(self._order)
+
     def snapshot(self) -> dict:
         running = self._jobs[self._current_id].to_dict() if self._current_id else None
         queued = [self._jobs[jid].to_dict() for jid in self._order]
