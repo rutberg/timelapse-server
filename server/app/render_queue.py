@@ -9,6 +9,7 @@ from typing import Optional
 
 MAX_CONCURRENT_RENDERS = 1
 RECENT_TTL_SECONDS = 60.0
+REAPER_INTERVAL_SECONDS = 5.0
 
 
 @dataclass
@@ -51,6 +52,8 @@ class RenderRunner:
     async def start(self) -> None:
         if self._worker is None:
             self._worker = asyncio.create_task(self._worker_loop())
+        if self._reaper is None:
+            self._reaper = asyncio.create_task(self._reaper_loop())
 
     async def stop(self) -> None:
         if self._current_proc and self._current_proc.returncode is None:
@@ -67,6 +70,13 @@ class RenderRunner:
             except asyncio.CancelledError:
                 pass
             self._worker = None
+        if self._reaper:
+            self._reaper.cancel()
+            try:
+                await self._reaper
+            except asyncio.CancelledError:
+                pass
+            self._reaper = None
 
     async def _worker_loop(self) -> None:
         while True:
@@ -98,6 +108,19 @@ class RenderRunner:
                 self._current_id = None
                 self._current_proc = None
                 self._queue.task_done()
+
+    async def _reaper_loop(self) -> None:
+        while True:
+            await asyncio.sleep(min(REAPER_INTERVAL_SECONDS, RECENT_TTL_SECONDS) / 2)
+            cutoff = time.time() - RECENT_TTL_SECONDS
+            stale = [
+                jid for jid, j in self._jobs.items()
+                if j.status in {"done", "failed", "cancelled"}
+                and j.finished_at is not None
+                and j.finished_at < cutoff
+            ]
+            for jid in stale:
+                self._jobs.pop(jid, None)
 
     async def _run_job(self, job: JobState) -> None:
         raise NotImplementedError

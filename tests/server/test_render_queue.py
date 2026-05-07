@@ -139,3 +139,21 @@ async def test_cancel_running_job_terminates(tmp_path, monkeypatch):
 
     assert runner._jobs[j1.id].status == "cancelled"
     assert fake_proc._terminated is True
+
+
+@pytest.mark.asyncio
+async def test_reaper_evicts_old_terminal_jobs(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+    # speed up reaper by patching the constant *and* adding a tiny tick
+    monkeypatch.setattr("app.render_queue.RECENT_TTL_SECONDS", 0.05)
+
+    j = _make_job("cam-a")
+    runner._jobs[j.id] = j
+    j.status = "done"
+    j.finished_at = time.time() - 1.0  # already old
+
+    await runner.start()
+    await asyncio.sleep(0.2)            # one reaper cycle
+    await runner.stop()
+
+    assert j.id not in runner._jobs
