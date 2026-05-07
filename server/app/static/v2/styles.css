@@ -456,3 +456,7 @@ details summary::-webkit-details-marker { display: none; }
 
 /* Focus */
 :focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+
+.quick-row { display: flex; flex-direction: column; gap: 6px; }
+.quick-row .quick-expand { display: flex; gap: 8px; align-items: center; padding: 4px 0 0; }
+.quick-row .quick-expand[hidden] { display: none; }

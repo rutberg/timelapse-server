@@ -11,6 +11,7 @@ import {
     statusKind,
     renderTopbar,
     openModal,
+    rendersStore,
 } from "/static/v2/app.js";
 import { mountScheduleControl } from "/static/v2/components/schedule.js";
 import { invalidateSidebar } from "/static/v2/components/sidebar.js";
@@ -239,6 +240,7 @@ async function renderCamera(root, hash, isActive = () => true) {
         if (tab === "renders") body.innerHTML = renderRendersTab();
         if (tab === "settings") body.innerHTML = renderSettingsTab();
 
+        if (tab === "overview") wireOverview();
         if (tab === "schedule") wireSchedule();
         if (tab === "settings") wireSettings();
         if (tab === "renders") wireRenders();
@@ -374,14 +376,96 @@ async function renderCamera(root, hash, isActive = () => true) {
 
           <div class="card"><div class="card-b">
             <div class="lbl">Quick render</div>
-            <div class="col" style="gap:8px;margin-top:8px">
-              <button class="btn" data-render-range="1">Last 24 hours${icon("arrow", 12)}</button>
-              <button class="btn" data-render-range="7">Last 7 days${icon("arrow", 12)}</button>
-              <button class="btn" data-render-range="all">All time${icon("arrow", 12)}</button>
+            <div class="col quick-render" style="gap:8px;margin-top:8px">
+              <div class="quick-row" data-preset="24h">
+                <button class="btn quick-label">Last 24 hours${icon("arrow", 12)}</button>
+                <div class="quick-expand" hidden>
+                  <div class="seg quick-format">
+                    <button data-fmt="mp4" class="active">MP4</button>
+                    <button data-fmt="gif">GIF</button>
+                  </div>
+                  <button class="btn primary quick-go">Render</button>
+                </div>
+              </div>
+              <div class="quick-row" data-preset="7d">
+                <button class="btn quick-label">Last 7 days${icon("arrow", 12)}</button>
+                <div class="quick-expand" hidden>
+                  <div class="seg quick-format">
+                    <button data-fmt="mp4" class="active">MP4</button>
+                    <button data-fmt="gif">GIF</button>
+                  </div>
+                  <button class="btn primary quick-go">Render</button>
+                </div>
+              </div>
+              <div class="quick-row" data-preset="all">
+                <button class="btn quick-label">All time${icon("arrow", 12)}</button>
+                <div class="quick-expand" hidden>
+                  <div class="seg quick-format">
+                    <button data-fmt="mp4" class="active">MP4</button>
+                    <button data-fmt="gif">GIF</button>
+                  </div>
+                  <button class="btn primary quick-go">Render</button>
+                </div>
+              </div>
             </div>
           </div></div>
         </div>
       </div>`;
+    }
+
+    function wireOverview() {
+        const root = document.querySelector(".quick-render");
+        if (!root) return;
+
+        root.querySelectorAll(".quick-row").forEach((row) => {
+            const expand = row.querySelector(".quick-expand");
+            const label = row.querySelector(".quick-label");
+            label.addEventListener("click", () => {
+                root.querySelectorAll(".quick-row").forEach((r) => {
+                    if (r !== row) r.querySelector(".quick-expand").hidden = true;
+                });
+                expand.hidden = !expand.hidden;
+            });
+            row.querySelectorAll("[data-fmt]").forEach((btn) => {
+                btn.addEventListener("click", () => {
+                    row.querySelectorAll("[data-fmt]").forEach((b) => b.classList.remove("active"));
+                    btn.classList.add("active");
+                });
+            });
+            row.querySelector(".quick-go").addEventListener("click", async () => {
+                const preset = row.dataset.preset;
+                const format = row.querySelector("[data-fmt].active").dataset.fmt;
+                const snap = rendersStore.getSnapshot();
+                const ids = [snap.running, ...snap.queued].filter(Boolean);
+                const dup = ids.find((j) =>
+                    j.camera_id === camera.camera_id && j.range_preset === preset && j.format === format
+                );
+                const goBtn = row.querySelector(".quick-go");
+                if (dup) {
+                    goBtn.disabled = true; goBtn.textContent = "Already queued";
+                    setTimeout(() => { goBtn.disabled = false; goBtn.textContent = "Render"; }, 1500);
+                    return;
+                }
+                goBtn.disabled = true; goBtn.textContent = "Queueing…";
+                try {
+                    const r = await fetch(`/api/cameras/${encId}/videos`, {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ format, fps: 24, range_preset: preset }),
+                    });
+                    if (!r.ok) {
+                        const err = await r.json().catch(() => ({}));
+                        goBtn.textContent = err.detail || "Failed";
+                        setTimeout(() => { goBtn.disabled = false; goBtn.textContent = "Render"; }, 2000);
+                        return;
+                    }
+                    goBtn.textContent = "Queued ✓";
+                    setTimeout(() => { expand.hidden = true; goBtn.disabled = false; goBtn.textContent = "Render"; }, 1200);
+                } catch (e) {
+                    goBtn.disabled = false; goBtn.textContent = "Render";
+                }
+            });
+        });
     }
 
     function renderFramesTab() {
