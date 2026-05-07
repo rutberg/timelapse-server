@@ -1604,10 +1604,14 @@ async def generate_video(camera_id: str, request: VideoRequest) -> dict:
         range_preset=request.range_preset,
         name=stem, queued_at=time.time(),
     )
-    position = get_runner().enqueue_with_inputs(
-        job, list_path=list_path, output_path=output_path,
-        total_frames=len(images),
-    )
+    try:
+        position = get_runner().enqueue_with_inputs(
+            job, list_path=list_path, output_path=output_path,
+            total_frames=len(images),
+        )
+    except Exception:
+        list_path.unlink(missing_ok=True)
+        raise
     return {"job_id": job_id, "status": "queued", "position": position}
 
 
@@ -1677,8 +1681,7 @@ def list_renders() -> dict:
 
 @app.get("/api/renders/{job_id}")
 def get_render(job_id: str) -> dict:
-    runner = get_runner()
-    job = runner._jobs.get(job_id)
+    job = get_runner().get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Render not found")
     return job.to_dict()

@@ -272,6 +272,9 @@ class RenderRunner:
         }
         return self.enqueue(job)
 
+    def get_job(self, job_id: str) -> Optional[JobState]:
+        return self._jobs.get(job_id)
+
     def snapshot(self) -> dict:
         running = self._jobs[self._current_id].to_dict() if self._current_id else None
         queued = [self._jobs[jid].to_dict() for jid in self._order]
