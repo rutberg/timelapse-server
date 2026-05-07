@@ -102,6 +102,18 @@ class RenderRunner:
     async def _run_job(self, job: JobState) -> None:
         raise NotImplementedError
 
+    async def cancel(self, job_id: str) -> bool:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        if job.status in {"done", "failed", "cancelled"}:
+            return True  # idempotent
+        job.cancel_requested = True
+        if self._current_id == job_id and self._current_proc is not None:
+            if self._current_proc.returncode is None:
+                self._current_proc.terminate()
+        return True
+
     def enqueue(self, job: JobState) -> int:
         if job.id in self._jobs:
             raise ValueError(f"duplicate job id: {job.id}")
