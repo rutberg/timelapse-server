@@ -48,6 +48,59 @@ class RenderRunner:
         self._current_id: Optional[str] = None
         self._current_proc: Optional[asyncio.subprocess.Process] = None
 
+    async def start(self) -> None:
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._worker_loop())
+
+    async def stop(self) -> None:
+        if self._current_proc and self._current_proc.returncode is None:
+            self._current_proc.terminate()
+            try:
+                await asyncio.wait_for(self._current_proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self._current_proc.kill()
+                await self._current_proc.wait()
+        if self._worker:
+            self._worker.cancel()
+            try:
+                await self._worker
+            except asyncio.CancelledError:
+                pass
+            self._worker = None
+
+    async def _worker_loop(self) -> None:
+        while True:
+            job_id = await self._queue.get()
+            try:
+                self._order.remove(job_id)
+            except ValueError:
+                pass
+            job = self._jobs[job_id]
+            if job.cancel_requested:
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                self._queue.task_done()
+                continue
+            job.status = "running"
+            job.started_at = time.time()
+            self._current_id = job_id
+            try:
+                await self._run_job(job)
+                job.status = "cancelled" if job.cancel_requested else "done"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                job.status = "failed"
+                job.error = str(exc)
+            finally:
+                job.finished_at = time.time()
+                self._current_id = None
+                self._current_proc = None
+                self._queue.task_done()
+
+    async def _run_job(self, job: JobState) -> None:
+        raise NotImplementedError
+
     def enqueue(self, job: JobState) -> int:
         if job.id in self._jobs:
             raise ValueError(f"duplicate job id: {job.id}")

@@ -1,3 +1,4 @@
+import asyncio
 import time
 import pytest
 from app.render_queue import JobState, RenderRunner
@@ -46,3 +47,28 @@ def test_enqueue_two_jobs_yields_fifo_snapshot(tmp_path):
     snap = runner.snapshot()
     assert snap["running"] is None
     assert [q["id"] for q in snap["queued"]] == [j1.id, j2.id]
+
+
+@pytest.mark.asyncio
+async def test_worker_runs_job_to_done(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+
+    async def fake_run(job: JobState) -> None:
+        job.percent = 100
+        job.output_path = "videos/cam-a/timelapse.mp4"
+
+    monkeypatch.setattr(runner, "_run_job", fake_run)
+
+    await runner.start()
+    runner.enqueue(_make_job("cam-a"))
+    # poll until terminal (or timeout)
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        snap = runner.snapshot()
+        if snap["running"] is None and snap["recent"]:
+            break
+    await runner.stop()
+
+    snap = runner.snapshot()
+    assert snap["recent"][0]["status"] == "done"
+    assert snap["recent"][0]["output_path"] == "videos/cam-a/timelapse.mp4"

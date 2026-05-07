@@ -16,3 +16,4 @@ packages = []
 testpaths = ["tests"]
 pythonpath = ["server", "agent"]
 addopts = "-q"
+asyncio_mode = "auto"
