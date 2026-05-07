@@ -44,6 +44,7 @@ class RenderRunner:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._jobs: dict[str, JobState] = {}
         self._order: list[str] = []
+        self._inputs: dict[str, dict] = {}
         self._worker: Optional[asyncio.Task] = None
         self._reaper: Optional[asyncio.Task] = None
         self._current_id: Optional[str] = None
@@ -123,7 +124,70 @@ class RenderRunner:
                 self._jobs.pop(jid, None)
 
     async def _run_job(self, job: JobState) -> None:
-        raise NotImplementedError
+        inputs = self._inputs.pop(job.id, None)
+        if inputs is None:
+            raise RuntimeError("missing inputs for job")
+        list_path: Path = inputs["list_path"]
+        output_path: Path = inputs["output_path"]
+        try:
+            if job.format == "mp4":
+                await self._run_mp4(job, list_path, output_path)
+            elif job.format == "gif":
+                await self._run_gif(job, list_path, output_path)
+            else:
+                raise ValueError(f"unsupported format: {job.format}")
+            if not job.cancel_requested:
+                job.percent = 100
+                job.output_path = str(output_path.relative_to(self._data_dir))
+        finally:
+            list_path.unlink(missing_ok=True)
+            if job.cancel_requested and output_path.exists():
+                output_path.unlink(missing_ok=True)
+
+    async def _run_mp4(self, job: JobState, list_path: Path, output_path: Path) -> None:
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", str(list_path),
+            "-vf", f"fps={job.fps},format=yuv420p",
+            "-c:v", "libx264", "-movflags", "+faststart",
+            "-progress", "pipe:1", str(output_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        self._current_proc = proc
+        last_frame = 0
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").strip()
+            if "=" not in text:
+                continue
+            key, value = text.split("=", 1)
+            if key == "frame":
+                try:
+                    last_frame = int(value)
+                except ValueError:
+                    continue
+                job.current_frame = last_frame
+                if job.total_frames:
+                    job.percent = min(100, round(last_frame / job.total_frames * 100))
+                    if job.started_at and last_frame > 0:
+                        elapsed = time.time() - job.started_at
+                        observed = last_frame / elapsed if elapsed else 0
+                        if observed > 0:
+                            job.eta_seconds = max(0, int(
+                                (job.total_frames - last_frame) / observed
+                            ))
+            elif key == "progress" and value == "end":
+                break
+        rc = await proc.wait()
+        if rc != 0 and not job.cancel_requested:
+            stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
+            raise RuntimeError(stderr or "ffmpeg failed")
 
     async def cancel(self, job_id: str) -> bool:
         job = self._jobs.get(job_id)
@@ -144,6 +208,18 @@ class RenderRunner:
         self._order.append(job.id)
         self._queue.put_nowait(job.id)
         return len(self._order)
+
+    def enqueue_with_inputs(
+        self, job: JobState, *, list_path: Path, output_path: Path,
+        total_frames: int,
+    ) -> int:
+        position = self.enqueue(job)
+        job.total_frames = total_frames
+        self._inputs[job.id] = {
+            "list_path": list_path,
+            "output_path": output_path,
+        }
+        return position
 
     def snapshot(self) -> dict:
         running = self._jobs[self._current_id].to_dict() if self._current_id else None
