@@ -191,6 +191,55 @@ class RenderRunner:
             stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
             raise RuntimeError(stderr or "ffmpeg failed")
 
+    async def _run_gif(self, job: JobState, list_path: Path, output_path: Path) -> None:
+        palette = output_path.with_suffix(".palette.png")
+        try:
+            palette_cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-vf", f"fps={job.fps},scale=720:-1:flags=lanczos,palettegen",
+                str(palette),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *palette_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            self._current_proc = proc
+            if job.cancel_requested:
+                proc.terminate()
+            rc = await proc.wait()
+            if rc != 0:
+                if job.cancel_requested:
+                    return
+                err = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
+                raise RuntimeError(err or "ffmpeg palettegen failed")
+            job.percent = 50
+
+            if job.cancel_requested:
+                return
+
+            encode_cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-i", str(palette),
+                "-filter_complex",
+                f"fps={job.fps},scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse",
+                str(output_path),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *encode_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            self._current_proc = proc
+            if job.cancel_requested:
+                proc.terminate()
+            rc = await proc.wait()
+            if rc != 0:
+                if job.cancel_requested:
+                    return
+                err = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
+                raise RuntimeError(err or "ffmpeg gif encode failed")
+        finally:
+            palette.unlink(missing_ok=True)
+
     async def cancel(self, job_id: str) -> bool:
         job = self._jobs.get(job_id)
         if job is None:

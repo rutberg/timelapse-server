@@ -204,3 +204,48 @@ async def test_run_job_mp4_produces_file_and_progress(tmp_path):
     assert rec["status"] == "done", rec
     assert out.exists()
     assert rec["percent"] == 100
+
+
+@pytest.mark.asyncio
+async def test_run_job_gif_produces_file(tmp_path):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    cam_dir = tmp_path / "images" / "cam-b" / "2026-05-04"
+    cam_dir.mkdir(parents=True)
+    minimal_jpeg = bytes.fromhex(
+        "ffd8ffe000104a46494600010200000100010000fffe0010"
+        "4c61766335392e33372e31303000ffdb00430008040404"
+        "04040505050505050606060606060606060606060607070"
+        "70708080807070706060707080808080909090808080809"
+        "090a0a0a0c0c0b0b0e0e0e111114ffc4004b0001010000"
+        "0000000000000000000000000008010100000000000000"
+        "00000000000000000010010000000000000000000000000"
+        "0000000110100000000000000000000000000000000ffc0"
+        "0011080002000203012200021100031100ffda000c030100"
+        "02110311003f009fc007ffd9"
+    )
+    (cam_dir / "143000.jpg").write_bytes(minimal_jpeg)
+    (cam_dir / "143005.jpg").write_bytes(minimal_jpeg)
+
+    list_path = tmp_path / "list.txt"
+    list_path.write_text(
+        f"file '{cam_dir / '143000.jpg'}'\nfile '{cam_dir / '143005.jpg'}'\n"
+    )
+    out = tmp_path / "out.gif"
+
+    runner = RenderRunner(tmp_path)
+    job = _make_job("cam-b", "gif")
+    runner.enqueue_with_inputs(
+        job, list_path=list_path, output_path=out, total_frames=2
+    )
+    await runner.start()
+    for _ in range(3000):
+        await asyncio.sleep(0.01)
+        if runner.snapshot()["running"] is None and runner.snapshot()["recent"]:
+            break
+    await runner.stop()
+
+    rec = runner.snapshot()["recent"][0]
+    assert rec["status"] == "done", rec
+    assert out.exists()
+    assert rec["percent"] == 100
