@@ -1,17 +1,13 @@
-import json
 import shutil
+import time
 from pathlib import Path
 import pytest
 
 
 @pytest.fixture(autouse=True)
 def _seed_two_jpegs(tmp_data_dir):
-    """Drop two minimal JPEG files into the images tree so ffmpeg has frames."""
     cam_dir = Path(tmp_data_dir) / "images" / "cam-vids" / "2026-05-04"
     cam_dir.mkdir(parents=True, exist_ok=True)
-    # Minimal valid 2x2 JPEG (dimensions divisible by 2 as required by libx264).
-    # Generated via: ffmpeg -f lavfi -i color=c=black:size=2x2:duration=0.1 -frames:v 1 out.jpg
-    # The spec's original hex was malformed (truncated Huffman tables); this replaces it.
     minimal_jpeg = bytes.fromhex(
         "ffd8ffe000104a46494600010200000100010000fffe0010"
         "4c61766335392e33372e31303000ffdb00430008040404"
@@ -28,100 +24,73 @@ def _seed_two_jpegs(tmp_data_dir):
     (cam_dir / "143005.jpg").write_bytes(minimal_jpeg)
 
 
-def parse_sse_done(response) -> dict:
-    """Parse an SSE response and return the data from the 'done' event.
+def _wait_for_terminal(client, job_id: str, timeout: float = 30.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = client.get(f"/api/renders/{job_id}")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        if body["status"] in {"done", "failed", "cancelled"}:
+            return body
+        time.sleep(0.1)
+    raise AssertionError(f"job {job_id} did not terminate within {timeout}s")
 
-    Raises AssertionError if an 'error' event is received.
-    """
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-    done_data = None
-    for raw_event in response.text.split("\n\n"):
-        lines = raw_event.strip().split("\n")
-        event_type = next(
-            (l.split(":", 1)[1].strip() for l in lines if l.startswith("event:")), None
-        )
-        data_str = next(
-            (l.split(":", 1)[1].strip() for l in lines if l.startswith("data:")), None
-        )
-        if not event_type or not data_str:
-            continue
-        data = json.loads(data_str)
-        if event_type == "error":
-            raise AssertionError(f"SSE error event: {data.get('detail')}")
-        if event_type == "done":
-            done_data = data
-    assert done_data is not None, "No 'done' SSE event received"
-    return done_data
+
+def _enqueue_and_wait(client, payload: dict) -> dict:
+    r = client.post("/api/cameras/cam-vids/videos", json=payload)
+    assert r.status_code == 202, r.text
+    job_id = r.json()["job_id"]
+    return _wait_for_terminal(client, job_id)
 
 
 def test_default_format_is_mp4(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    response = client.post(
-        "/api/cameras/cam-vids/videos",
-        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12},
-    )
-    done = parse_sse_done(response)
-    assert done["path"].endswith(".mp4")
+    body = _enqueue_and_wait(client, {"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12})
+    assert body["status"] == "done"
+    assert body["output_path"].endswith(".mp4")
 
 
 def test_explicit_mp4_format(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    response = client.post(
-        "/api/cameras/cam-vids/videos",
-        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "mp4"},
-    )
-    done = parse_sse_done(response)
-    assert done["path"].endswith(".mp4")
+    body = _enqueue_and_wait(client, {"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "mp4"})
+    assert body["output_path"].endswith(".mp4")
 
 
 def test_gif_format(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    response = client.post(
-        "/api/cameras/cam-vids/videos",
-        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "gif"},
-    )
-    done = parse_sse_done(response)
-    assert done["path"].endswith(".gif")
+    body = _enqueue_and_wait(client, {"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "gif"})
+    assert body["output_path"].endswith(".gif")
 
 
 def test_invalid_format_rejected(client):
-    response = client.post(
-        "/api/cameras/cam-vids/videos",
-        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "webm"},
-    )
-    assert response.status_code == 422
+    r = client.post("/api/cameras/cam-vids/videos",
+                    json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "webm"})
+    assert r.status_code == 422
 
 
 def test_gif_can_be_downloaded(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    done = parse_sse_done(client.post(
-        "/api/cameras/cam-vids/videos",
-        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "gif"},
-    ))
-    filename = done["path"].split("/")[-1]
-    response = client.get(f"/api/cameras/cam-vids/videos/{filename}")
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "image/gif"
+    body = _enqueue_and_wait(client, {"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "gif"})
+    filename = body["output_path"].split("/")[-1]
+    r = client.get(f"/api/cameras/cam-vids/videos/{filename}")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/gif"
 
 
 def test_mp4_can_be_downloaded(client):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    done = parse_sse_done(client.post(
-        "/api/cameras/cam-vids/videos",
-        json={"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "mp4"},
-    ))
-    filename = done["path"].split("/")[-1]
-    response = client.get(f"/api/cameras/cam-vids/videos/{filename}")
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "video/mp4"
+    body = _enqueue_and_wait(client, {"start_date": "2026-05-04", "end_date": "2026-05-04", "fps": 12, "format": "mp4"})
+    filename = body["output_path"].split("/")[-1]
+    r = client.get(f"/api/cameras/cam-vids/videos/{filename}")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "video/mp4"
 
 
 def test_unsupported_extension_returns_404(client):
-    response = client.get("/api/cameras/cam-vids/videos/foo.webm")
-    assert response.status_code == 404
+    r = client.get("/api/cameras/cam-vids/videos/foo.webm")
+    assert r.status_code == 404

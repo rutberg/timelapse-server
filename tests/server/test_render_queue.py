@@ -274,3 +274,20 @@ def test_range_preset_unknown_raises():
 def test_unique_video_stem_appends_suffix():
     stem = unique_video_stem(timestamp="20260507T120000Z", job_id="abcdef1234")
     assert stem == "timelapse-20260507T120000Z-abcdef"
+
+
+def test_renders_endpoint_returns_snapshot(client):
+    r = client.get("/api/renders")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"running": None, "queued": [], "recent": []}
+
+
+def test_render_lookup_404_for_unknown_job(client):
+    r = client.get("/api/renders/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_cancel_unknown_job_returns_404(client):
+    r = client.delete("/api/renders/does-not-exist")
+    assert r.status_code == 404
