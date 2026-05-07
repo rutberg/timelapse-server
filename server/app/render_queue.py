@@ -88,6 +88,7 @@ class RenderRunner:
                 await self._run_job(job)
                 job.status = "cancelled" if job.cancel_requested else "done"
             except asyncio.CancelledError:
+                job.status = "cancelled"
                 raise
             except Exception as exc:  # noqa: BLE001
                 job.status = "failed"
