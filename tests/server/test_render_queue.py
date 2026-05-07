@@ -2,6 +2,7 @@ import asyncio
 import shutil
 import time
 import pytest
+from datetime import datetime, timezone
 from app.render_queue import JobState, RenderRunner
 
 
@@ -249,3 +250,27 @@ async def test_run_job_gif_produces_file(tmp_path):
     assert rec["status"] == "done", rec
     assert out.exists()
     assert rec["percent"] == 100
+
+
+from app.render_queue import resolve_range_preset, unique_video_stem
+
+
+def test_range_preset_24h(monkeypatch):
+    fixed = datetime(2026, 5, 7, 12, 0, 0, tzinfo=timezone.utc)
+    start, end = resolve_range_preset("24h", now=fixed)
+    assert end == "2026-05-07T12:00:00+00:00"
+    assert start == "2026-05-06T12:00:00+00:00"
+
+
+def test_range_preset_all_returns_none():
+    assert resolve_range_preset("all") == (None, None)
+
+
+def test_range_preset_unknown_raises():
+    with pytest.raises(ValueError):
+        resolve_range_preset("month")
+
+
+def test_unique_video_stem_appends_suffix():
+    stem = unique_video_stem(timestamp="20260507T120000Z", job_id="abcdef1234")
+    assert stem == "timelapse-20260507T120000Z-abcdef"

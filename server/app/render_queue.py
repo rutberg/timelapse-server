@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -282,3 +283,25 @@ class RenderRunner:
         ]
         recent.sort(key=lambda d: d["finished_at"] or 0, reverse=True)
         return {"running": running, "queued": queued, "recent": recent}
+
+
+_RANGE_PRESETS = {
+    "24h": timedelta(days=1),
+    "7d":  timedelta(days=7),
+}
+
+
+def resolve_range_preset(
+    preset: str, *, now: Optional[datetime] = None
+) -> tuple[Optional[str], Optional[str]]:
+    if preset == "all":
+        return None, None
+    if preset not in _RANGE_PRESETS:
+        raise ValueError(f"unknown range_preset: {preset}")
+    end = (now or datetime.now(timezone.utc))
+    start = end - _RANGE_PRESETS[preset]
+    return start.isoformat(), end.isoformat()
+
+
+def unique_video_stem(*, timestamp: str, job_id: str) -> str:
+    return f"timelapse-{timestamp}-{job_id[:6]}"
