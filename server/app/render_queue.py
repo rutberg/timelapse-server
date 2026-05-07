@@ -158,6 +158,8 @@ class RenderRunner:
             stderr=asyncio.subprocess.PIPE,
         )
         self._current_proc = proc
+        if job.cancel_requested:
+            proc.terminate()
         last_frame = 0
         while True:
             line = await proc.stdout.readline()
@@ -213,13 +215,12 @@ class RenderRunner:
         self, job: JobState, *, list_path: Path, output_path: Path,
         total_frames: int,
     ) -> int:
-        position = self.enqueue(job)
         job.total_frames = total_frames
         self._inputs[job.id] = {
             "list_path": list_path,
             "output_path": output_path,
         }
-        return position
+        return self.enqueue(job)
 
     def snapshot(self) -> dict:
         running = self._jobs[self._current_id].to_dict() if self._current_id else None
