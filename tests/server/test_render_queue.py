@@ -108,6 +108,33 @@ async def test_cancel_queued_job_skips_when_popped(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancel_queued_job_disappears_from_snapshot_immediately(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_run(job):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(runner, "_run_job", slow_run)
+    await runner.start()
+    j1 = _make_job("cam-a"); j2 = _make_job("cam-b")
+    runner.enqueue(j1)
+    runner.enqueue(j2)
+    await started.wait()
+    assert [q["id"] for q in runner.snapshot()["queued"]] == [j2.id]
+    assert await runner.cancel(j2.id) is True
+    # snapshot should reflect the cancellation now, not after j1 finishes
+    snap = runner.snapshot()
+    assert snap["queued"] == []
+    assert runner._jobs[j2.id].status == "cancelled"
+    release.set()
+    await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_cancel_running_job_terminates(tmp_path, monkeypatch):
     runner = RenderRunner(tmp_path)
 

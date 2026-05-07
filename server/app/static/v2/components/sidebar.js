@@ -8,6 +8,7 @@ let cachedStats = null;
 let lastFetch = 0;
 let latestSnap = { running: null, queued: [], recent: [] };
 const armedCancels = new Set();
+const cancellingIds = new Set();
 
 function cameraThumbScene(camera) {
   // Cheap deterministic mapping so each camera gets a consistent placeholder
@@ -69,7 +70,7 @@ function renderRow(job, kind) {
         const cancelling = job.cancel_requested ? "(cancelling…)" : "";
         return `
           <div class="render-row running">
-            <div class="render-row-head">▶ Rendering · ${escapeHtml(job.camera_id)} · ${job.format.toUpperCase()}</div>
+            <div class="render-row-head">▶ Rendering · ${escapeHtml(job.camera_id)} · ${job.format.toUpperCase()} · ${fmtRange(job)}</div>
             <div class="render-bar"><span style="width:${pct}%"></span></div>
             <div class="render-meta">
               <span>${pct}% ${eta}</span>
@@ -126,6 +127,11 @@ function wireServerPanel(panel) {
     if (!panel) return;
     panel.querySelectorAll(".cancel-btn").forEach((btn) => {
         const id = btn.dataset.cancel;
+        if (cancellingIds.has(id)) {
+            btn.disabled = true;
+            btn.textContent = "…";
+            return;
+        }
         if (armedCancels.has(id)) {
             btn.classList.add("armed");
             btn.textContent = "Cancel?";
@@ -135,10 +141,18 @@ function wireServerPanel(panel) {
         btn.addEventListener("click", (e) => {
             e.preventDefault(); e.stopPropagation();
             const id = btn.dataset.cancel;
+            if (cancellingIds.has(id)) return;
             if (armedCancels.has(id)) {
                 armedCancels.delete(id);
+                cancellingIds.add(id);
                 btn.disabled = true; btn.textContent = "…";
-                rendersStore.cancel(id).catch(() => {});
+                rendersStore.cancel(id)
+                    .catch(() => {})
+                    .finally(() => {
+                        // Clear shortly after the next likely poll cycle so the
+                        // row either disappears or returns to its normal state.
+                        setTimeout(() => cancellingIds.delete(id), 3000);
+                    });
                 return;
             }
             armedCancels.add(id);

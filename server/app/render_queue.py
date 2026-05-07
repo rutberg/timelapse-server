@@ -87,7 +87,11 @@ class RenderRunner:
                 self._order.remove(job_id)
             except ValueError:
                 pass
-            job = self._jobs[job_id]
+            job = self._jobs.get(job_id)
+            if job is None or job.status in {"cancelled", "done", "failed"}:
+                # Already handled (e.g. cancelled while queued, or evicted).
+                self._queue.task_done()
+                continue
             if job.cancel_requested:
                 job.status = "cancelled"
                 job.finished_at = time.time()
@@ -162,6 +166,12 @@ class RenderRunner:
         if job.cancel_requested:
             proc.terminate()
         last_frame = 0
+        # Rolling window of (frame_idx, monotonic_time) samples. Using a window
+        # avoids skewing ETA by ffmpeg's startup lag (subprocess + decoder
+        # init), which makes a naive "frames / elapsed-since-started_at" rate
+        # massively underestimate throughput for the first few frames.
+        samples: list[tuple[int, float]] = []
+        ETA_WINDOW = 20
         while True:
             line = await proc.stdout.readline()
             if not line:
@@ -178,12 +188,18 @@ class RenderRunner:
                 job.current_frame = last_frame
                 if job.total_frames:
                     job.percent = min(100, round(last_frame / job.total_frames * 100))
-                    if job.started_at and last_frame > 0:
-                        elapsed = time.time() - job.started_at
-                        observed = last_frame / elapsed if elapsed else 0
-                        if observed > 0:
+                    now = time.monotonic()
+                    samples.append((last_frame, now))
+                    if len(samples) > ETA_WINDOW:
+                        samples.pop(0)
+                    if len(samples) >= 3:
+                        f0, t0 = samples[0]
+                        df = last_frame - f0
+                        dt = now - t0
+                        if df > 0 and dt > 0.5:
+                            rate = df / dt
                             job.eta_seconds = max(0, int(
-                                (job.total_frames - last_frame) / observed
+                                (job.total_frames - last_frame) / rate
                             ))
             elif key == "progress" and value == "end":
                 break
@@ -251,6 +267,16 @@ class RenderRunner:
         if self._current_id == job_id and self._current_proc is not None:
             if self._current_proc.returncode is None:
                 self._current_proc.terminate()
+        elif job.status == "queued":
+            # Eagerly remove queued cancellations so the UI updates on next poll
+            # instead of waiting for the running job to finish first.
+            try:
+                self._order.remove(job_id)
+            except ValueError:
+                pass
+            self._inputs.pop(job_id, None)
+            job.status = "cancelled"
+            job.finished_at = time.time()
         return True
 
     def enqueue(self, job: JobState) -> int:
