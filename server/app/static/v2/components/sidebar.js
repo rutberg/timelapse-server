@@ -123,7 +123,36 @@ function serverPanel(stats, snap) {
 }
 
 function wireServerPanel(panel) {
-    // stub — wired in Task 17
+    if (!panel) return;
+    panel.querySelectorAll(".cancel-btn").forEach((btn) => {
+        const id = btn.dataset.cancel;
+        if (armedCancels.has(id)) {
+            btn.classList.add("armed");
+            btn.textContent = "Cancel?";
+        }
+    });
+    panel.querySelectorAll(".cancel-btn").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const id = btn.dataset.cancel;
+            if (armedCancels.has(id)) {
+                armedCancels.delete(id);
+                btn.disabled = true; btn.textContent = "…";
+                rendersStore.cancel(id).catch(() => {});
+                return;
+            }
+            armedCancels.add(id);
+            btn.classList.add("armed");
+            btn.textContent = "Cancel?";
+            setTimeout(() => {
+                armedCancels.delete(id);
+                if (btn.isConnected) {
+                    btn.classList.remove("armed");
+                    btn.textContent = "✕";
+                }
+            }, 1500);
+        });
+    });
 }
 
 export async function renderSidebar(hash) {
