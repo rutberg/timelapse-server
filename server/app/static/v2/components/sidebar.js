@@ -155,9 +155,27 @@ function wireServerPanel(panel) {
     });
 }
 
+let subscribed = false;
+function ensureRenderSubscription() {
+    if (subscribed) return;
+    subscribed = true;
+    rendersStore.subscribe((s) => {
+        latestSnap = s;
+        const existing = document.querySelector("#sidebar .server-panel");
+        if (existing) {
+            const wrapper = document.createElement("div");
+            wrapper.innerHTML = serverPanel(cachedStats, s).trim();
+            const replacement = wrapper.firstElementChild;
+            existing.replaceWith(replacement);
+            wireServerPanel(replacement);
+        }
+    });
+}
+
 export async function renderSidebar(hash) {
   const root = document.getElementById("sidebar");
   if (!root) return;
+  ensureRenderSubscription();
   await loadIfStale();
   const cameras = cachedCameras || [];
 
@@ -211,18 +229,6 @@ export async function renderSidebar(hash) {
   `;
   wireServerPanel(root.querySelector(".server-panel"));
 }
-
-rendersStore.subscribe((s) => {
-    latestSnap = s;
-    const existing = document.querySelector("#sidebar .server-panel");
-    if (existing) {
-        const wrapper = document.createElement("div");
-        wrapper.innerHTML = serverPanel(cachedStats, s).trim();
-        const replacement = wrapper.firstElementChild;
-        existing.replaceWith(replacement);
-        wireServerPanel(replacement);
-    }
-});
 
 // Allow other views (e.g. after creating/deleting a camera) to nuke the cache.
 export function invalidateSidebar() {
