@@ -193,7 +193,7 @@ class DslrRawConfigEntry(BaseModel):
 
 class CameraConfig(BaseModel):
     enabled: bool = True
-    interval_seconds: int = Field(900, ge=30, le=86_400)
+    interval_seconds: int = Field(900, ge=5, le=86_400)
     image_width: Optional[int] = Field(None, ge=320, le=10_000)
     image_height: Optional[int] = Field(None, ge=240, le=10_000)
     jpeg_quality: int = Field(85, ge=1, le=100)

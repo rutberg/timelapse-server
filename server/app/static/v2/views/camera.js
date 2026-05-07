@@ -144,6 +144,7 @@ async function renderCamera(root, hash, isActive = () => true) {
         loading: false,
         error: "",
         warping: false,
+        lastKnownImageCount: null,
     };
     let frameMarquee = null;
     let frameMarqueeMoved = false;
@@ -207,6 +208,14 @@ async function renderCamera(root, hash, isActive = () => true) {
             }
             if (tab === "frames" && framesState.mounted) {
                 updateFrameToolbar();
+                const polledCount = camera.image_count ?? null;
+                if (
+                    !framesState.loading &&
+                    polledCount !== null &&
+                    polledCount !== framesState.lastKnownImageCount
+                ) {
+                    loadFrameArchive({ keepDay: true });
+                }
                 return;
             }
             // Don't repaint the renders tab on the 15s poll — it would yank
@@ -214,6 +223,12 @@ async function renderCamera(root, hash, isActive = () => true) {
             // list is refreshed by wireRenders() on tab navigation and after
             // explicit deletes.
             if (tab === "renders" && document.getElementById("renders-list")) {
+                return;
+            }
+            // Don't repaint the settings tab on the 15s poll — rebuilding the
+            // DOM resets the <details> "Show all keys" expansion and discards
+            // any in-progress edits.
+            if (tab === "settings" && document.getElementById("settings-msg")) {
                 return;
             }
             paint();
@@ -666,6 +681,7 @@ async function renderCamera(root, hash, isActive = () => true) {
             framesState.days = data.days || [];
             framesState.months = data.months || [];
             framesState.archiveLoaded = true;
+            framesState.lastKnownImageCount = camera.image_count ?? null;
             if (
                 !keepDay ||
                 !framesState.days.some(
@@ -2156,7 +2172,7 @@ async function renderCamera(root, hash, isActive = () => true) {
               <input class="input sans" id="s-location" value="${escapeHtml(cfg.location_label || "")}" placeholder="e.g. Greenhouse shelf 2"/>
             </label>
             <label class="field"><span class="lbl">Interval (seconds)</span>
-              <input class="input" id="s-interval" type="number" min="30" max="86400" value="${cfg.interval_seconds || 600}"/>
+              <input class="input" id="s-interval" type="number" min="5" max="86400" value="${cfg.interval_seconds || 600}"/>
             </label>
             <label class="field"${hide}><span class="lbl">Width (px)</span>
               <input class="input" id="s-width" type="number" min="320" max="10000" value="${cfg.image_width || ""}" placeholder="full"/>
@@ -2179,9 +2195,9 @@ async function renderCamera(root, hash, isActive = () => true) {
 
         <div class="row" style="margin-top:14px;gap:8px">
           <button class="btn primary" data-save-settings>Save settings</button>
-          <span class="small" id="settings-msg"></span>
           <button class="btn danger" style="margin-left:auto" data-delete-camera>${icon("trash", 12)}Delete camera</button>
         </div>
+        <div id="settings-msg"></div>
       </div>`;
     }
 
@@ -2282,12 +2298,17 @@ async function renderCamera(root, hash, isActive = () => true) {
                         `/api/cameras/${encId}/config`,
                         { method: "PUT", body: JSON.stringify(payload) },
                     );
-                    msg.textContent = "Saved.";
-                    msg.style.color = "var(--green)";
+                    msg.innerHTML = `<p class="small" style="color:var(--green);margin-top:8px">Saved.</p>`;
                     invalidateSidebar();
                 } catch (e) {
-                    msg.textContent = e.message;
-                    msg.style.color = "var(--red)";
+                    msg.innerHTML = `
+                        <div class="banner bad" style="margin-top:10px">
+                          ${icon("alert", 14)}
+                          <div class="grow">
+                            <strong>Could not save settings</strong>
+                            <div class="mono small" style="color:var(--soft);margin-top:4px;word-break:break-word">${escapeHtml(e.message)}</div>
+                          </div>
+                        </div>`;
                 }
             });
 

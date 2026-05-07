@@ -597,6 +597,28 @@ _NEW_FILE_RE = re.compile(
     r"^New file is in location (?P<path>/\S+?) on the camera\s*$"
 )
 
+# gphoto2 --capture-image-and-download prints:
+#   Saving file as /abs/path/to/file.jpg   (when --filename is honoured)
+# or (some Nikon drivers ignore --filename and fall back to a relative name):
+#   Saving file as capt0000.jpg
+_SAVING_AS_RE = re.compile(r"^Saving file as (.+)$", re.MULTILINE)
+
+
+def _gphoto2_actual_download(stdout: str, cwd: Path) -> Optional[Path]:
+    """Return the path where gphoto2 actually saved the downloaded file.
+
+    Needed because some drivers (e.g. the Nikon D7000 ptp2 driver) ignore the
+    --filename argument and save to a relative name in the working directory
+    instead of the absolute path we requested.
+    """
+    m = _SAVING_AS_RE.search(stdout)
+    if m is None:
+        return None
+    p = Path(m.group(1).strip())
+    if not p.is_absolute():
+        p = cwd / p
+    return p
+
 
 def parse_new_file_location(stdout: str) -> Optional[CameraFileRef]:
     """Parse gphoto2 --capture-image stdout and return the camera file reference.
@@ -1327,7 +1349,11 @@ def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
         # immediately. Some cameras (e.g. Sony RX100) keep the captured file
         # only in RAM; a separate --get-file call issued even seconds later
         # finds nothing. Downloading inline avoids that race.
-        subprocess.run(
+        #
+        # Run in the pending/ dir so that drivers (e.g. Nikon D7000 ptp2)
+        # that ignore --filename fall back to a relative name (capt0000.jpg)
+        # that lands in a predictable location we can find.
+        result = subprocess.run(
             [
                 "gphoto2",
                 "--capture-image-and-download",
@@ -1335,7 +1361,17 @@ def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
                 "--force-overwrite",
             ],
             check=True, capture_output=True, text=True, timeout=60,
+            cwd=str(output_path.parent),
         )
+        if not temp_path.exists():
+            # Driver ignored --filename; find where it actually wrote the file.
+            actual = _gphoto2_actual_download(result.stdout, output_path.parent)
+            if actual is None or not actual.exists():
+                raise RuntimeError(
+                    f"gphoto2 capture-and-download succeeded but no file found "
+                    f"at {temp_path} (stdout: {result.stdout.strip()!r})"
+                )
+            actual.replace(temp_path)
         temp_path.replace(output_path)
         metadata = {"captured_at": now_local_iso(), "hostname": socket.gethostname()}
         write_json(output_path.with_suffix(".json"), metadata)
