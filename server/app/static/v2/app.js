@@ -244,6 +244,64 @@ async function render() {
     root.innerHTML = `<div class="empty"><h3>Not found</h3><div class="mono small">${escapeHtml(hash)}</div></div>`;
 }
 
+const ACTIVE_INTERVAL_MS = 1500;
+const IDLE_INTERVAL_MS   = 10000;
+
+export const rendersStore = (() => {
+    let snapshot = { running: null, queued: [], recent: [] };
+    const subs = new Set();
+    let timer = null;
+    let inflight = false;
+
+    const isActive = () =>
+        snapshot.running !== null || (snapshot.queued && snapshot.queued.length > 0);
+
+    async function tick() {
+        if (document.visibilityState !== "visible") {
+            schedule(IDLE_INTERVAL_MS);
+            return;
+        }
+        if (inflight) {
+            schedule(isActive() ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS);
+            return;
+        }
+        inflight = true;
+        try {
+            const r = await fetch("/api/renders", { headers: { Accept: "application/json" } });
+            if (r.ok) {
+                snapshot = await r.json();
+                subs.forEach((cb) => { try { cb(snapshot); } catch (_) {} });
+            }
+        } catch (_) { /* swallow; retry on next tick */ }
+        finally {
+            inflight = false;
+            schedule(isActive() ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS);
+        }
+    }
+
+    function schedule(ms) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(tick, ms);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+            schedule(0);
+        }
+    });
+
+    schedule(0);
+
+    return {
+        getSnapshot: () => snapshot,
+        subscribe: (cb) => { subs.add(cb); cb(snapshot); return () => subs.delete(cb); },
+        async cancel(jobId) {
+            await fetch(`/api/renders/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+            schedule(0);
+        },
+    };
+})();
+
 window.addEventListener("hashchange", render);
 
 if (!window.location.hash) {
