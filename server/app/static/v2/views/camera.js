@@ -209,6 +209,13 @@ async function renderCamera(root, hash, isActive = () => true) {
                 updateFrameToolbar();
                 return;
             }
+            // Don't repaint the renders tab on the 15s poll — it would yank
+            // out the active <video> element and reset playback. The renders
+            // list is refreshed by wireRenders() on tab navigation and after
+            // explicit deletes.
+            if (tab === "renders" && document.getElementById("renders-list")) {
+                return;
+            }
             paint();
         } catch (e) {
             if (!isActive()) return;
