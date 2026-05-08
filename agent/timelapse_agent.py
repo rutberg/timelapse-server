@@ -111,9 +111,7 @@ def resolve_max_pending_bytes(settings: Dict[str, Any], work_dir: Path) -> int:
     return int(configured)
 
 
-def resolve_pending_dirs(
-    settings: Dict[str, Any], work_dir: Path
-) -> tuple[Path, Path]:
+def resolve_pending_dirs(settings: Dict[str, Any], work_dir: Path) -> tuple[Path, Path]:
     """Return (ram_dir, spill_dir).
 
     If 'ram_pending_dir' is set in settings, captures write to that path
@@ -126,6 +124,26 @@ def resolve_pending_dirs(
         return Path(configured), work_dir / "spill"
     pending = work_dir / "pending"
     return pending, pending
+
+
+def effective_pending_dirs(
+    settings: Dict[str, Any],
+    remote_config: Dict[str, Any],
+    work_dir: Path,
+) -> tuple[Path, Path]:
+    """Resolve pending dirs, honoring the server's storage_mode override if present."""
+    mode = remote_config.get("storage_mode")
+    if mode == "sd":
+        pending = work_dir / "pending"
+        return pending, pending
+    if mode == "ram":
+        # Force RAM mode: use configured ram_pending_dir if present, else
+        # fall back to /run/timelapse-agent/pending (the provisioned default).
+        ram_dir = settings.get("ram_pending_dir") or "/run/timelapse-agent/pending"
+        return Path(ram_dir), work_dir / "spill"
+
+    # None or any unrecognised value → use local config
+    return resolve_pending_dirs(settings, work_dir)
 
 
 def solar_window(
@@ -173,9 +191,9 @@ def solar_window(
         math.cos(lat_rad) * math.cos(decl)
     )
     if cos_ha < -1.0:
-        return (0, 24)         # polar day
+        return (0, 24)  # polar day
     if cos_ha > 1.0:
-        return None            # polar night
+        return None  # polar night
     ha = math.degrees(math.acos(cos_ha))
 
     # Solar noon (UTC minutes)
@@ -410,7 +428,10 @@ def check_for_update(
     work_dir.mkdir(parents=True, exist_ok=True)
     download_dir = work_dir / "updates"
 
-    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/update-manifest"
+    url = (
+        settings["server_url"].rstrip("/")
+        + f"/api/cameras/{settings['camera_id']}/update-manifest"
+    )
     try:
         manifest = request_json(url, timeout=15)
     except HTTPError as error:
@@ -459,7 +480,10 @@ def read_wifi_rssi() -> Optional[int]:
     try:
         result = subprocess.run(
             ["iw", "dev", interface, "link"],
-            check=False, capture_output=True, text=True, timeout=2,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
@@ -476,7 +500,10 @@ def read_wifi_rssi() -> Optional[int]:
 
 
 def post_checkin(settings: Dict[str, Any], state: AgentState) -> None:
-    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/checkin"
+    url = (
+        settings["server_url"].rstrip("/")
+        + f"/api/cameras/{settings['camera_id']}/checkin"
+    )
     dslr_payload: Optional[Dict[str, Any]] = None
     if state.active_backend == "gphoto2":
         tel = state.dslr_telemetry or {}
@@ -572,7 +599,10 @@ def gphoto2_available() -> bool:
     try:
         result = subprocess.run(
             ["gphoto2", "--auto-detect"],
-            check=False, capture_output=True, text=True, timeout=5,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
@@ -614,9 +644,7 @@ class CameraFileRef:
 
 # gphoto2 prints a line like:
 #   New file is in location /store_00020001/DCIM/100CANON/IMG_0042.CR3 on the camera
-_NEW_FILE_RE = re.compile(
-    r"^New file is in location (?P<path>/\S+?) on the camera\s*$"
-)
+_NEW_FILE_RE = re.compile(r"^New file is in location (?P<path>/\S+?) on the camera\s*$")
 
 # gphoto2 --capture-image-and-download prints:
 #   Saving file as /abs/path/to/file.jpg   (when --filename is honoured)
@@ -664,13 +692,14 @@ def gphoto2_capture_trigger(timeout: int = 30) -> CameraFileRef:
     """
     result = subprocess.run(
         ["gphoto2", "--capture-image"],
-        check=True, capture_output=True, text=True, timeout=timeout,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     ref = parse_new_file_location(result.stdout)
     if ref is None:
-        raise RuntimeError(
-            f"Could not parse gphoto2 capture output: {result.stdout!r}"
-        )
+        raise RuntimeError(f"Could not parse gphoto2 capture output: {result.stdout!r}")
     return ref
 
 
@@ -698,11 +727,13 @@ def save_camera_pending(work_dir: Path, entries: List[Dict[str, str]]) -> None:
 def add_camera_pending(work_dir: Path, ref: CameraFileRef, captured_at: str) -> None:
     """Append a new pending entry for an image still on the camera."""
     entries = load_camera_pending(work_dir)
-    entries.append({
-        "folder": ref.folder,
-        "filename": ref.filename,
-        "captured_at": captured_at,
-    })
+    entries.append(
+        {
+            "folder": ref.folder,
+            "filename": ref.filename,
+            "captured_at": captured_at,
+        }
+    )
     save_camera_pending(work_dir, entries)
 
 
@@ -710,7 +741,8 @@ def remove_camera_pending(work_dir: Path, ref: CameraFileRef) -> None:
     """Drop the entry matching (folder, filename). No-op if missing."""
     entries = load_camera_pending(work_dir)
     filtered = [
-        e for e in entries
+        e
+        for e in entries
         if not (e.get("folder") == ref.folder and e.get("filename") == ref.filename)
     ]
     if len(filtered) != len(entries):
@@ -720,7 +752,9 @@ def remove_camera_pending(work_dir: Path, ref: CameraFileRef) -> None:
 GPHOTO2_STAGE_DIR = Path("/tmp/timelapse-agent-stage")
 
 
-def gphoto2_download_file(ref: CameraFileRef, dest_path: Path, timeout: int = 120) -> Path:
+def gphoto2_download_file(
+    ref: CameraFileRef, dest_path: Path, timeout: int = 120
+) -> Path:
     """Download a single file from the camera to dest_path.
 
     The destination should live on tmpfs (/tmp on Pi OS) so the SD card never
@@ -730,12 +764,18 @@ def gphoto2_download_file(ref: CameraFileRef, dest_path: Path, timeout: int = 12
     subprocess.run(
         [
             "gphoto2",
-            "--folder", ref.folder,
-            "--get-file", ref.filename,
-            "--filename", str(dest_path),
+            "--folder",
+            ref.folder,
+            "--get-file",
+            ref.filename,
+            "--filename",
+            str(dest_path),
             "--force-overwrite",
         ],
-        check=True, capture_output=True, text=True, timeout=timeout,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return dest_path
 
@@ -751,10 +791,15 @@ def gphoto2_delete_file(ref: CameraFileRef, timeout: int = 30) -> None:
         subprocess.run(
             [
                 "gphoto2",
-                "--folder", ref.folder,
-                "--delete-file", ref.filename,
+                "--folder",
+                ref.folder,
+                "--delete-file",
+                ref.filename,
             ],
-            check=True, capture_output=True, text=True, timeout=timeout,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except subprocess.CalledProcessError as error:
         stderr = (error.stderr or "").lower()
@@ -772,10 +817,19 @@ def gphoto2_disable_autopoweroff(timeout: int = 10) -> None:
     try:
         subprocess.run(
             ["gphoto2", "--set-config", "autopoweroff=0"],
-            check=True, capture_output=True, text=True, timeout=timeout,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
-        logging.info("Could not disable camera autopoweroff (often harmless): %s", error)
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as error:
+        logging.info(
+            "Could not disable camera autopoweroff (often harmless): %s", error
+        )
 
 
 _DSLR_INIT_KEY_MAP: Dict[str, str] = {
@@ -794,8 +848,15 @@ _DSLR_SEQUENCE_KEY_MAP: Dict[str, str] = {
 }
 
 _DSLR_CHOICE_KEYS: List[str] = [
-    "shutterspeed", "aperture", "iso", "exposurecompensation",
-    "whitebalance", "imageformat", "capturetarget", "drivemode", "focusmode",
+    "shutterspeed",
+    "aperture",
+    "iso",
+    "exposurecompensation",
+    "whitebalance",
+    "imageformat",
+    "capturetarget",
+    "drivemode",
+    "focusmode",
 ]
 
 
@@ -824,9 +885,16 @@ def gphoto2_read_choices_and_current(
         try:
             result = subprocess.run(
                 ["gphoto2", "--get-config", key],
-                check=True, capture_output=True, text=True, timeout=10,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ):
             continue
         values: List[str] = []
         current: Optional[str] = None
@@ -933,10 +1001,19 @@ def gphoto2_apply_init_settings(
         try:
             subprocess.run(
                 ["gphoto2", "--set-config", f"{gphoto_key}={value}"],
-                check=True, capture_output=True, text=True, timeout=10,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as err:
-            logging.warning("Could not set DSLR init setting %s=%s: %s", gphoto_key, value, err)
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ) as err:
+            logging.warning(
+                "Could not set DSLR init setting %s=%s: %s", gphoto_key, value, err
+            )
 
 
 def gphoto2_apply_sequence_settings(
@@ -958,22 +1035,38 @@ def gphoto2_apply_sequence_settings(
         try:
             subprocess.run(
                 ["gphoto2", "--set-config", f"{gphoto_key}={value}"],
-                check=True, capture_output=True, text=True, timeout=10,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as err:
-            logging.warning("Could not set DSLR sequence setting %s=%s: %s", gphoto_key, value, err)
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ) as err:
+            logging.warning(
+                "Could not set DSLR sequence setting %s=%s: %s", gphoto_key, value, err
+            )
 
 
 def _gphoto2_get_current(key: str) -> Optional[str]:
     try:
         result = subprocess.run(
             ["gphoto2", "--get-config", key],
-            check=True, capture_output=True, text=True, timeout=10,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         for line in result.stdout.splitlines():
             if line.startswith("Current:"):
                 return line.split(":", 1)[1].strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ):
         pass
     return None
 
@@ -1025,8 +1118,12 @@ def gphoto2_read_telemetry(
     counter_str = _gphoto2_get_current("shuttercounter")
     return {
         "battery_level": _gphoto2_get_current("batterylevel"),
-        "available_shots": int(shots_str) if shots_str and shots_str.isdigit() else None,
-        "shutter_counter": int(counter_str) if counter_str and counter_str.isdigit() else None,
+        "available_shots": int(shots_str)
+        if shots_str and shots_str.isdigit()
+        else None,
+        "shutter_counter": int(counter_str)
+        if counter_str and counter_str.isdigit()
+        else None,
         "exposure_mode": _gphoto2_first_current("autoexposuremode", "expprogram"),
         "lens_name": _gphoto2_get_current("lensname"),
         "camera_model": _gphoto2_first_current("cameramodel", "model"),
@@ -1092,7 +1189,10 @@ def gphoto2_list_config(timeout: int = 30) -> Dict[str, Dict[str, Any]]:
     """Run `gphoto2 --list-all-config` and return the parsed property tree."""
     result = subprocess.run(
         ["gphoto2", "--list-all-config"],
-        check=True, capture_output=True, text=True, timeout=timeout,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return parse_list_all_config(result.stdout)
 
@@ -1169,9 +1269,7 @@ def post_discovery_result(
         return False
 
 
-def run_dslr_discovery(
-    settings: Dict[str, Any], state: AgentState, token: str
-) -> None:
+def run_dslr_discovery(settings: Dict[str, Any], state: AgentState, token: str) -> None:
     """Run `gphoto2 --list-all-config`, post the parsed tree to the server.
 
     The token is only marked handled when the server has acknowledged our
@@ -1182,8 +1280,11 @@ def run_dslr_discovery(
     logging.info("Running DSLR discovery (token=%s)", token)
     try:
         tree = gphoto2_list_config()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            FileNotFoundError) as err:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as err:
         logging.warning("DSLR discovery failed: %s", err)
         if post_discovery_result(settings, token, error=str(err)):
             state.last_discovery_token = token
@@ -1193,7 +1294,9 @@ def run_dslr_discovery(
         state.last_discovery_token = token
         logging.info(
             "DSLR discovery posted: %d keys, vendor=%s model=%s",
-            len(tree), body.get("vendor"), body.get("model"),
+            len(tree),
+            body.get("vendor"),
+            body.get("model"),
         )
 
 
@@ -1210,7 +1313,10 @@ def upload_camera_pending(
     if not entries:
         return
 
-    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/upload"
+    url = (
+        settings["server_url"].rstrip("/")
+        + f"/api/cameras/{settings['camera_id']}/upload"
+    )
     GPHOTO2_STAGE_DIR.mkdir(parents=True, exist_ok=True)
 
     for entry in list(entries):
@@ -1225,7 +1331,8 @@ def upload_camera_pending(
             if "could not find" in stderr or "file not found" in stderr:
                 logging.warning(
                     "Camera file missing, dropping queue entry: %s/%s",
-                    ref.folder, ref.filename,
+                    ref.folder,
+                    ref.filename,
                 )
                 remove_camera_pending(work_dir, ref)
                 continue
@@ -1255,7 +1362,9 @@ def upload_camera_pending(
         logging.info("Uploaded (camera) %s", ref.filename)
 
 
-def build_capture_command(command: str, output_path: Path, config: Dict[str, Any]) -> list:
+def build_capture_command(
+    command: str, output_path: Path, config: Dict[str, Any]
+) -> list:
     quality = str(config.get("jpeg_quality", DEFAULT_REMOTE_CONFIG["jpeg_quality"]))
 
     if command.endswith("raspistill"):
@@ -1305,27 +1414,58 @@ def mean_y_from_yuv(raw: bytes, width: int, height: int) -> Optional[int]:
     return sum(plane) // len(plane)
 
 
-def sample_light_level(command: str, width: int = 64, height: int = 48) -> Optional[int]:
+def sample_light_level(
+    command: str, width: int = 64, height: int = 48
+) -> Optional[int]:
     """Capture a tiny YUV thumbnail and return the mean Y luminance (0-255).
 
     Returns None if no capture tool is available or if the tool fails.
     """
     if command.endswith("raspistill"):
-        cmd = [command, "-n", "-t", "200", "-w", str(width), "-h", str(height),
-               "-e", "yuv", "-o", "-"]
+        cmd = [
+            command,
+            "-n",
+            "-t",
+            "200",
+            "-w",
+            str(width),
+            "-h",
+            str(height),
+            "-e",
+            "yuv",
+            "-o",
+            "-",
+        ]
     else:
-        cmd = [command, "--nopreview", "--timeout", "200",
-               "--width", str(width), "--height", str(height),
-               "--encoding", "yuv420", "--output", "-"]
+        cmd = [
+            command,
+            "--nopreview",
+            "--timeout",
+            "200",
+            "--width",
+            str(width),
+            "--height",
+            str(height),
+            "--encoding",
+            "yuv420",
+            "--output",
+            "-",
+        ]
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, timeout=5)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as error:
         logging.warning("Light sample failed: %s", error)
         return None
     return mean_y_from_yuv(result.stdout, width, height)
 
 
-def should_capture_for_scene(current_light: Optional[int], threshold: Optional[int]) -> bool:
+def should_capture_for_scene(
+    current_light: Optional[int], threshold: Optional[int]
+) -> bool:
     """Capture decision for scene-light mode.
 
     Conservative defaults: missing threshold or missing reading both return True
@@ -1380,10 +1520,14 @@ def capture_frame(ram_dir: Path, config: Dict[str, Any]) -> Path:
             [
                 "gphoto2",
                 "--capture-image-and-download",
-                "--filename", str(temp_path),
+                "--filename",
+                str(temp_path),
                 "--force-overwrite",
             ],
-            check=True, capture_output=True, text=True, timeout=60,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
             cwd=str(output_path.parent),
         )
         if not temp_path.exists():
@@ -1419,7 +1563,10 @@ def capture_frame(ram_dir: Path, config: Dict[str, Any]) -> Path:
 
 
 def fetch_remote_config(settings: Dict[str, Any], cache_path: Path) -> Dict[str, Any]:
-    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/config"
+    url = (
+        settings["server_url"].rstrip("/")
+        + f"/api/cameras/{settings['camera_id']}/config"
+    )
     try:
         config = request_json(url)
         write_json(cache_path, config)
@@ -1472,7 +1619,9 @@ def upload_pending(
                     try:
                         shutil.move(str(image_path), spill_dir / image_path.name)
                         if metadata_path.exists():
-                            shutil.move(str(metadata_path), spill_dir / metadata_path.name)
+                            shutil.move(
+                                str(metadata_path), spill_dir / metadata_path.name
+                            )
                     except OSError as move_err:
                         logging.warning(
                             "Could not spill %s to SD: %s", image_path.name, move_err
@@ -1495,7 +1644,9 @@ def upload_pending(
     upload_camera_pending(settings, work_dir, state)
 
 
-def next_due_time(last_capture: Optional[float], interval_seconds: int, now: float) -> float:
+def next_due_time(
+    last_capture: Optional[float], interval_seconds: int, now: float
+) -> float:
     if last_capture is None:
         return now
     return max(now, last_capture + interval_seconds)
@@ -1520,7 +1671,11 @@ def run_agent(settings: Dict[str, Any]) -> None:
 
     logging.info(
         "Agent v%s started for camera_id=%s (ram_dir=%s spill_dir=%s max_pending_bytes=%s)",
-        AGENT_VERSION, settings["camera_id"], ram_dir, spill_dir, max_pending_bytes,
+        AGENT_VERSION,
+        settings["camera_id"],
+        ram_dir,
+        spill_dir,
+        max_pending_bytes,
     )
     active_backend = resolve_active_backend(remote_config)
     state.active_backend = active_backend
@@ -1528,8 +1683,10 @@ def run_agent(settings: Dict[str, Any]) -> None:
         gphoto2_disable_autopoweroff()
         dslr_config = remote_config.get("dslr") or {}
         prop_map = remote_config.get("dslr_property_map")
-        state.dslr_choices, state.dslr_current_values = gphoto2_read_choices_and_current(
-            prop_map=prop_map,
+        state.dslr_choices, state.dslr_current_values = (
+            gphoto2_read_choices_and_current(
+                prop_map=prop_map,
+            )
         )
         if dslr_config:
             gphoto2_apply_init_settings(dslr_config, prop_map=prop_map)
@@ -1555,7 +1712,9 @@ def run_agent(settings: Dict[str, Any]) -> None:
         )
     else:
         startup_effective_hours = remote_config.get("capture_hours")
-    state.in_schedule = is_in_schedule(startup_now, startup_effective_hours, remote_config.get("schedule_days"))
+    state.in_schedule = is_in_schedule(
+        startup_now, startup_effective_hours, remote_config.get("schedule_days")
+    )
     post_checkin(settings, state)
 
     while True:
@@ -1564,11 +1723,27 @@ def run_agent(settings: Dict[str, Any]) -> None:
         if now >= next_config_poll:
             previous_interval = int(remote_config.get("interval_seconds", 900))
             remote_config = fetch_remote_config(settings, cache_path)
+
+            # Re-evaluate storage dirs on every poll.
+            new_ram, new_spill = effective_pending_dirs(
+                settings, remote_config, work_dir
+            )
+            if new_ram != ram_dir or new_spill != spill_dir:
+                logging.info(
+                    "Storage mode changed: ram_dir=%s, spill_dir=%s", new_ram, new_spill
+                )
+                ram_dir, spill_dir = new_ram, new_spill
+                ram_dir.mkdir(parents=True, exist_ok=True)
+                if spill_dir != ram_dir:
+                    spill_dir.mkdir(parents=True, exist_ok=True)
+
             new_interval = int(remote_config.get("interval_seconds", previous_interval))
             if new_interval != previous_interval:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
-            state.pending_count, state.pending_bytes = measure_pending(ram_dir, spill_dir)
+            state.pending_count, state.pending_bytes = measure_pending(
+                ram_dir, spill_dir
+            )
             state.pending_count += measure_camera_pending(work_dir)
             if state.active_backend == "gphoto2":
                 dslr_config = remote_config.get("dslr") or {}
@@ -1583,7 +1758,9 @@ def run_agent(settings: Dict[str, Any]) -> None:
                     state.last_init_at = now_local_iso()
                     logging.info("DSLR re-initialized (token=%s)", new_token)
                 else:
-                    state.dslr_current_values = gphoto2_read_current_values(prop_map=prop_map)
+                    state.dslr_current_values = gphoto2_read_current_values(
+                        prop_map=prop_map
+                    )
                 state.dslr_telemetry = gphoto2_read_telemetry(prop_map=prop_map)
                 # Run discovery if the server has set a fresh pending token.
                 pending = remote_config.get("dslr_pending_discovery")
@@ -1613,7 +1790,9 @@ def run_agent(settings: Dict[str, Any]) -> None:
             )
         else:
             effective_hours = remote_config.get("capture_hours")
-        in_schedule = is_in_schedule(local_now, effective_hours, remote_config.get("schedule_days"))
+        in_schedule = is_in_schedule(
+            local_now, effective_hours, remote_config.get("schedule_days")
+        )
         # Update state every loop so heartbeat reflects the current view.
         state.local_hour = local_now.hour
         if in_schedule != state.in_schedule:
@@ -1622,12 +1801,15 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_hour = next_allowed_hour(local_now.hour, effective_hours)
                 logging.info(
                     "Capture paused — outside schedule (local hour %d, allowed %s, resume at %02d:00)",
-                    local_now.hour, effective_hours, next_hour,
+                    local_now.hour,
+                    effective_hours,
+                    next_hour,
                 )
             elif in_schedule and effective_hours:
                 logging.info(
                     "Capture resumed — local hour %d is within schedule %s",
-                    local_now.hour, effective_hours,
+                    local_now.hour,
+                    effective_hours,
                 )
         if enabled and not in_schedule and now >= next_capture:
             # Outside the schedule: skip this slot, re-check at the next interval.
@@ -1656,7 +1838,8 @@ def run_agent(settings: Dict[str, Any]) -> None:
             ):
                 logging.info(
                     "Scene-light gate: Y=%s < threshold=%s, skipping",
-                    state.current_light, remote_config.get("light_threshold"),
+                    state.current_light,
+                    remote_config.get("light_threshold"),
                 )
                 next_capture = now + interval_seconds
         if enabled and in_schedule and now >= next_capture:
@@ -1676,14 +1859,20 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = now + min(300, interval_seconds)
             else:
                 last_capture = time.monotonic()
-                evicted_count, evicted_bytes = evict_pending(spill_dir, max_pending_bytes)
+                evicted_count, evicted_bytes = evict_pending(
+                    spill_dir, max_pending_bytes
+                )
                 if evicted_count:
                     logging.warning(
                         "Evicted %d oldest pending captures (%d bytes) to stay under %d-byte cap",
-                        evicted_count, evicted_bytes, max_pending_bytes,
+                        evicted_count,
+                        evicted_bytes,
+                        max_pending_bytes,
                     )
                 upload_pending(settings, work_dir, ram_dir, spill_dir, state)
-                state.pending_count, state.pending_bytes = measure_pending(ram_dir, spill_dir)
+                state.pending_count, state.pending_bytes = measure_pending(
+                    ram_dir, spill_dir
+                )
                 state.pending_count += measure_camera_pending(work_dir)
                 next_capture = last_capture + interval_seconds
 

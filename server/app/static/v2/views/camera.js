@@ -280,7 +280,7 @@ async function renderCamera(root, hash, isActive = () => true) {
             "click",
             togglePause,
         );
-        root.querySelector('[data-toggle-featured]')?.addEventListener(
+        root.querySelector("[data-toggle-featured]")?.addEventListener(
             "click",
             toggleFeatured,
         );
@@ -444,49 +444,76 @@ async function renderCamera(root, hash, isActive = () => true) {
             const label = row.querySelector(".quick-label");
             label.addEventListener("click", () => {
                 root.querySelectorAll(".quick-row").forEach((r) => {
-                    if (r !== row) r.querySelector(".quick-expand").hidden = true;
+                    if (r !== row)
+                        r.querySelector(".quick-expand").hidden = true;
                 });
                 expand.hidden = !expand.hidden;
             });
             row.querySelectorAll("[data-fmt]").forEach((btn) => {
                 btn.addEventListener("click", () => {
-                    row.querySelectorAll("[data-fmt]").forEach((b) => b.classList.remove("active"));
+                    row.querySelectorAll("[data-fmt]").forEach((b) =>
+                        b.classList.remove("active"),
+                    );
                     btn.classList.add("active");
                 });
             });
-            row.querySelector(".quick-go").addEventListener("click", async () => {
-                const preset = row.dataset.preset;
-                const format = row.querySelector("[data-fmt].active").dataset.fmt;
-                const snap = rendersStore.getSnapshot();
-                const ids = [snap.running, ...snap.queued].filter(Boolean);
-                const dup = ids.find((j) =>
-                    j.camera_id === camera.camera_id && j.range_preset === preset && j.format === format
-                );
-                const goBtn = row.querySelector(".quick-go");
-                if (dup) {
-                    goBtn.disabled = true; goBtn.textContent = "Already queued";
-                    setTimeout(() => { goBtn.disabled = false; goBtn.textContent = "Render"; }, 1500);
-                    return;
-                }
-                goBtn.disabled = true; goBtn.textContent = "Queueing…";
-                try {
-                    const r = await fetch(`/api/cameras/${encId}/videos`, {
-                        method: "POST",
-                        headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ format, fps: 24, range_preset: preset }),
-                    });
-                    if (!r.ok) {
-                        const err = await r.json().catch(() => ({}));
-                        goBtn.textContent = err.detail || "Failed";
-                        setTimeout(() => { goBtn.disabled = false; goBtn.textContent = "Render"; }, 2000);
+            row.querySelector(".quick-go").addEventListener(
+                "click",
+                async () => {
+                    const preset = row.dataset.preset;
+                    const format =
+                        row.querySelector("[data-fmt].active").dataset.fmt;
+                    const snap = rendersStore.getSnapshot();
+                    const ids = [snap.running, ...snap.queued].filter(Boolean);
+                    const dup = ids.find(
+                        (j) =>
+                            j.camera_id === camera.camera_id &&
+                            j.range_preset === preset &&
+                            j.format === format,
+                    );
+                    const goBtn = row.querySelector(".quick-go");
+                    if (dup) {
+                        goBtn.disabled = true;
+                        goBtn.textContent = "Already queued";
+                        setTimeout(() => {
+                            goBtn.disabled = false;
+                            goBtn.textContent = "Render";
+                        }, 1500);
                         return;
                     }
-                    goBtn.textContent = "Queued ✓";
-                    setTimeout(() => { expand.hidden = true; goBtn.disabled = false; goBtn.textContent = "Render"; }, 1200);
-                } catch (e) {
-                    goBtn.disabled = false; goBtn.textContent = "Render";
-                }
-            });
+                    goBtn.disabled = true;
+                    goBtn.textContent = "Queueing…";
+                    try {
+                        const r = await fetch(`/api/cameras/${encId}/videos`, {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify({
+                                format,
+                                fps: 24,
+                                range_preset: preset,
+                            }),
+                        });
+                        if (!r.ok) {
+                            const err = await r.json().catch(() => ({}));
+                            goBtn.textContent = err.detail || "Failed";
+                            setTimeout(() => {
+                                goBtn.disabled = false;
+                                goBtn.textContent = "Render";
+                            }, 2000);
+                            return;
+                        }
+                        goBtn.textContent = "Queued ✓";
+                        setTimeout(() => {
+                            expand.hidden = true;
+                            goBtn.disabled = false;
+                            goBtn.textContent = "Render";
+                        }, 1200);
+                    } catch (e) {
+                        goBtn.disabled = false;
+                        goBtn.textContent = "Render";
+                    }
+                },
+            );
         });
     }
 
@@ -1874,7 +1901,11 @@ async function renderCamera(root, hash, isActive = () => true) {
                 const t = tiles.find((x) => x.field === opt.field);
                 return t
                     ? renderProposalRow(true, opt.label, `(${t.read_key})`)
-                    : renderProposalRow(false, opt.label, "— not exposed by this body");
+                    : renderProposalRow(
+                          false,
+                          opt.label,
+                          "— not exposed by this body",
+                      );
             })
             .join("");
 
@@ -1982,7 +2013,8 @@ async function renderCamera(root, hash, isActive = () => true) {
             })
             .filter(Boolean)
             .join("");
-        const tileCount = (tileHtml.match(/<div><div class="lbl"/g) || []).length;
+        const tileCount = (tileHtml.match(/<div><div class="lbl"/g) || [])
+            .length;
         const lastInit = dslrSt.last_init_at
             ? escapeHtml(relativeTime(dslrSt.last_init_at))
             : "—";
@@ -1990,10 +2022,12 @@ async function renderCamera(root, hash, isActive = () => true) {
         const initHtml = initKeys.length
             ? initKeys
                   .map((k) => {
-                      const opts = (choices[k.read_key] || []).map(
-                          (v) =>
-                              `<option value="${escapeHtml(v)}" ${v === (currentValues[k.read_key] || dslrCfg[k.settings_field] || "") ? "selected" : ""}>${escapeHtml(v)}</option>`,
-                      ).join("");
+                      const opts = (choices[k.read_key] || [])
+                          .map(
+                              (v) =>
+                                  `<option value="${escapeHtml(v)}" ${v === (currentValues[k.read_key] || dslrCfg[k.settings_field] || "") ? "selected" : ""}>${escapeHtml(v)}</option>`,
+                          )
+                          .join("");
                       return `<label class="field"><span class="lbl">${escapeHtml(k.label)}</span><select class="input" id="${dslrInitId(k.settings_field)}"><option value="">— (leave as-is)</option>${opts}</select></label>`;
                   })
                   .join("")
@@ -2003,7 +2037,9 @@ async function renderCamera(root, hash, isActive = () => true) {
             .map((d) => {
                 const choiceList = choices[d.read_key] || [];
                 const selected =
-                    currentValues[d.read_key] || dslrCfg[d.settings_field] || "";
+                    currentValues[d.read_key] ||
+                    dslrCfg[d.settings_field] ||
+                    "";
                 return dslrSelect(
                     dslrFieldId(d.settings_field),
                     d.label,
@@ -2030,7 +2066,9 @@ async function renderCamera(root, hash, isActive = () => true) {
         <div style="margin-top:8px"><a class="small" href="#" data-rerun-discovery>Re-run discovery</a></div>
       </div></div>
 
-      ${initKeys.length ? `
+      ${
+          initKeys.length
+              ? `
       <div class="card" style="margin-top:14px"><div class="card-b">
         <div class="lbl">Camera Initialization</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
@@ -2040,20 +2078,30 @@ async function renderCamera(root, hash, isActive = () => true) {
           <button class="btn" data-reinit ${reinitInFlight ? "disabled" : ""}>${reinitInFlight ? "⏳ Re-initializing…" : "Re-initialize"}</button>
           <span class="small" id="reinit-msg">${reinitStatusHtml()}</span>
         </div>
-      </div></div>` : ""}
+      </div></div>`
+              : ""
+      }
 
-      ${dropdowns.length ? `
+      ${
+          dropdowns.length
+              ? `
       <div class="card" style="margin-top:14px"><div class="card-b">
         <div class="lbl">Capture Settings</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
           ${dropdownsHtml}
         </div>
-      </div></div>` : ""}`;
+      </div></div>`
+              : ""
+      }`;
     }
 
     function renderDslrSection(cfg, status) {
         if (cfg.dslr_property_map) {
-            return renderDslrSectionMapDriven(cfg, status, cfg.dslr_property_map);
+            return renderDslrSectionMapDriven(
+                cfg,
+                status,
+                cfg.dslr_property_map,
+            );
         }
         const dslrCfg = cfg.dslr || {};
         const dslrSt = (status && status.dslr) || {};
@@ -2187,9 +2235,26 @@ async function renderCamera(root, hash, isActive = () => true) {
               <input class="input" id="s-version" value="${escapeHtml(cfg.desired_agent_version || "")}" placeholder="latest"/>
             </label>
           </div>
-        </div></div>
+          </div></div>
 
-        ${isGphoto2 && !cfg.dslr_property_map && discoveryState !== "proposal-ready" ? renderDiscoveryBanner() : ""}
+          <div class="card" style="margin-top:14px"><div class="card-b">
+          <div class="lbl">Storage</div>
+          <div class="row" style="margin-top:12px;gap:12px;align-items:center">
+          <div class="grow">
+            <div style="font-size:15px;font-weight:500">RAM buffer</div>
+            <div class="small" style="color:var(--soft);margin-top:2px">
+              Captures land in RAM first; failed uploads spill to SD card automatically.
+            </div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="s-storage-ram" ${cfg.storage_mode === "sd" ? "" : "checked"}>
+            <span class="slider"></span>
+          </label>
+          </div>
+          </div></div>
+
+          ${isGphoto2 && !cfg.dslr_property_map && discoveryState !== "proposal-ready" ? renderDiscoveryBanner() : ""}
+
         ${isGphoto2 && !cfg.dslr_property_map && discoveryState === "proposal-ready" ? renderDiscoveryConfirmCard() : ""}
         ${isGphoto2 && cfg.dslr_property_map ? renderDslrSection(cfg, camera.status) : ""}
 
@@ -2228,7 +2293,8 @@ async function renderCamera(root, hash, isActive = () => true) {
                     shutterspeed: existing.shutterspeed || null,
                     aperture: existing.aperture || null,
                     iso: existing.iso || null,
-                    exposure_compensation: existing.exposure_compensation || null,
+                    exposure_compensation:
+                        existing.exposure_compensation || null,
                     whitebalance: existing.whitebalance || null,
                     image_format: existing.image_format || null,
                     reinit_token: withReinit
@@ -2240,8 +2306,9 @@ async function renderCamera(root, hash, isActive = () => true) {
                     if (v !== null) payload[k.settings_field] = v;
                 }
                 for (const d of propMap.setting_dropdowns || []) {
-                    payload[d.settings_field] =
-                        selVal(`d-set-${d.settings_field}`);
+                    payload[d.settings_field] = selVal(
+                        `d-set-${d.settings_field}`,
+                    );
                 }
                 return payload;
             }
@@ -2282,6 +2349,9 @@ async function renderCamera(root, hash, isActive = () => true) {
                     Number(document.getElementById("s-quality").value) || 85,
                 desired_agent_version:
                     document.getElementById("s-version").value.trim() || null,
+                storage_mode: document.getElementById("s-storage-ram").checked
+                    ? "ram"
+                    : "sd",
             };
         }
 
@@ -2484,9 +2554,7 @@ async function renderCamera(root, hash, isActive = () => true) {
                 method: "PUT",
                 body: JSON.stringify(discoveryProposal),
             });
-            camera.config = await api.fetchJson(
-                `/api/cameras/${encId}/config`,
-            );
+            camera.config = await api.fetchJson(`/api/cameras/${encId}/config`);
             discoveryState = "idle";
             discoveryProposal = null;
             discoveryRawKeys = [];

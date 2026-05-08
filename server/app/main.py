@@ -243,6 +243,18 @@ class CameraConfig(BaseModel):
             "libcamera-still/raspistill), or 'gphoto2' (USB DSLR via gphoto2)."
         ),
     )
+    storage_mode: Optional[str] = Field(
+        default=None,
+        description="Override for agent's local pending-queue storage mode: 'ram' or 'sd'. None = use agent local default.",
+    )
+
+    @field_validator("storage_mode")
+    @classmethod
+    def validate_storage_mode(cls, value: Optional[str]) -> Optional[str]:
+        if value not in (None, "ram", "sd"):
+            raise ValueError("storage_mode must be 'ram', 'sd', or null")
+        return value
+
     dslr: Optional[DslrSettings] = None
     dslr_property_map: Optional[DslrPropertyMap] = None
     dslr_pending_discovery: Optional[DslrPendingDiscovery] = None
@@ -1203,7 +1215,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _require_camera_record(camera_id: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+def _require_camera_record(
+    camera_id: str,
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     camera_id = safe_identifier(camera_id)
     store = load_store()
     cameras = store.setdefault("cameras", {})
@@ -1257,9 +1271,7 @@ def post_dslr_discovery_result(
         return {"acknowledged": True, "stale": True}
 
     completed_at = _now_iso()
-    raw_dict = {
-        path: entry.model_dump() for path, entry in payload.raw_config.items()
-    }
+    raw_dict = {path: entry.model_dump() for path, entry in payload.raw_config.items()}
     body_dict = payload.body.model_dump() if payload.body is not None else None
 
     proposal: Optional[Dict[str, Any]] = None
@@ -1565,9 +1577,10 @@ async def generate_video(camera_id: str, request: VideoRequest) -> dict:
 
     if request.range_preset:
         from app.render_queue import resolve_range_preset
+
         start_iso, end_iso = resolve_range_preset(request.range_preset)
         request.start_date = (start_iso or "")[:10] or None
-        request.end_date   = (end_iso   or "")[:10] or None
+        request.end_date = (end_iso or "")[:10] or None
 
     images = selected_images(camera_id, request)
     if not images:
@@ -1584,29 +1597,39 @@ async def generate_video(camera_id: str, request: VideoRequest) -> dict:
         try:
             stem = safe_identifier(request.name)
         except HTTPException as error:
-            raise HTTPException(status_code=400, detail=f"Invalid video name: {error.detail}") from error
+            raise HTTPException(
+                status_code=400, detail=f"Invalid video name: {error.detail}"
+            ) from error
     else:
         from app.render_queue import unique_video_stem
+
         stem = unique_video_stem(timestamp=timestamp, job_id=job_id)
 
     output_path = video_dir / f"{stem}.{request.format}"
-    list_path   = video_dir / f"{stem}.txt"
+    list_path = video_dir / f"{stem}.txt"
 
     with list_path.open("w", encoding="utf-8") as list_file:
         for path in images:
             list_file.write(f"file '{ffmpeg_escape(path)}'\n")
 
     from app.render_queue import JobState
+
     job = JobState(
-        id=job_id, camera_id=camera_id,
-        format=request.format, fps=request.fps,
-        start_at=request.start_date, end_at=request.end_date,
+        id=job_id,
+        camera_id=camera_id,
+        format=request.format,
+        fps=request.fps,
+        start_at=request.start_date,
+        end_at=request.end_date,
         range_preset=request.range_preset,
-        name=stem, queued_at=time.time(),
+        name=stem,
+        queued_at=time.time(),
     )
     try:
         position = get_runner().enqueue_with_inputs(
-            job, list_path=list_path, output_path=output_path,
+            job,
+            list_path=list_path,
+            output_path=output_path,
             total_frames=len(images),
         )
     except Exception:
