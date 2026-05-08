@@ -49,7 +49,7 @@ function fmtRange(job) {
     if (job.range_preset === "all") return "all time";
     if (job.range_preset === "24h") return "24h";
     if (job.range_preset === "7d")  return "7d";
-    if (job.start_at && job.end_at) return `${job.start_at.slice(0,10)} → ${job.end_at.slice(0,10)}`;
+    if (job.start_at && job.end_at) return `${escapeHtml(job.start_at.slice(0,10))} → ${escapeHtml(job.end_at.slice(0,10))}`;
     return "—";
 }
 

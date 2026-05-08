@@ -434,8 +434,8 @@ def validate_ssh_user(value: str) -> str:
 
 
 class VideoRequest(BaseModel):
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
+    start_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     fps: int = Field(24, ge=1, le=60)
     name: Optional[str] = None
     format: str = Field("mp4", pattern=r"^(mp4|gif)$")
