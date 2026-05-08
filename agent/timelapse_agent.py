@@ -253,18 +253,20 @@ def measure_pending(ram_dir: Path, spill_dir: Path) -> tuple[int, int]:
     return (count, total)
 
 
-def evict_pending(work_dir: Path, max_bytes: int) -> tuple[int, int]:
-    """Delete oldest pending captures until total size <= max_bytes.
+def evict_pending(spill_dir: Path, max_bytes: int) -> tuple[int, int]:
+    """Delete oldest spill-tier captures until total size <= max_bytes.
 
-    Returns (evicted_count, evicted_bytes). max_bytes <= 0 means no cap
-    (returns 0, 0). Sidecar .json metadata is removed alongside its image.
+    Only the SD spill directory is evicted; the RAM pending directory is
+    never touched here — images there either upload successfully (and are
+    deleted) or are moved to spill on failure.
+    max_bytes <= 0 means no cap (returns 0, 0). Sidecar .json metadata is
+    removed alongside its image.
     """
     if max_bytes <= 0:
         return (0, 0)
-    pending_dir = work_dir / "pending"
-    if not pending_dir.exists():
+    if not spill_dir.exists():
         return (0, 0)
-    files = sorted(pending_dir.glob("*.jpg"))
+    files = sorted(spill_dir.glob("*.jpg"))
     sizes = []
     total = 0
     for path in files:
@@ -1632,7 +1634,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = now + min(300, interval_seconds)
             else:
                 last_capture = time.monotonic()
-                evicted_count, evicted_bytes = evict_pending(work_dir, max_pending_bytes)
+                evicted_count, evicted_bytes = evict_pending(work_dir / "spill", max_pending_bytes)
                 if evicted_count:
                     logging.warning(
                         "Evicted %d oldest pending captures (%d bytes) to stay under %d-byte cap",

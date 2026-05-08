@@ -48,3 +48,39 @@ def test_measure_pending_missing_dirs(tmp_path):
     count, total = agent.measure_pending(tmp_path / "ram", tmp_path / "spill")
     assert count == 0
     assert total == 0
+
+
+def test_evict_pending_removes_oldest_from_spill(tmp_path):
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    (spill / "20260101T000000.jpg").write_bytes(b"a" * 600)
+    (spill / "20260101T000001.jpg").write_bytes(b"b" * 600)
+    evicted_count, evicted_bytes = agent.evict_pending(spill, max_bytes=700)
+    assert evicted_count == 1
+    assert evicted_bytes == 600
+    remaining = list(spill.glob("*.jpg"))
+    assert len(remaining) == 1
+    assert remaining[0].name == "20260101T000001.jpg"
+
+
+def test_evict_pending_removes_sidecar(tmp_path):
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    (spill / "20260101T000000.jpg").write_bytes(b"a" * 1000)
+    (spill / "20260101T000000.json").write_text('{"captured_at":"2026-01-01T00:00:00+00:00"}')
+    agent.evict_pending(spill, max_bytes=0)
+    # max_bytes=0 means unlimited — nothing evicted
+    assert (spill / "20260101T000000.jpg").exists()
+
+
+def test_evict_pending_zero_means_unlimited(tmp_path):
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    (spill / "20260101T000000.jpg").write_bytes(b"x" * 1000)
+    count, _ = agent.evict_pending(spill, max_bytes=0)
+    assert count == 0
+
+
+def test_evict_pending_missing_dir_is_noop(tmp_path):
+    count, _ = agent.evict_pending(tmp_path / "spill", max_bytes=100)
+    assert count == 0

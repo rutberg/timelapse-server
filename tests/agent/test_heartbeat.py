@@ -118,7 +118,7 @@ def test_evict_pending_drops_oldest_until_under_cap(tmp_path):
         (pending / name).write_bytes(b"x" * 200)
         (pending / name.replace(".jpg", ".json")).write_text("{}")
 
-    evicted_count, evicted_bytes = agent.evict_pending(tmp_path, max_bytes=400)
+    evicted_count, evicted_bytes = agent.evict_pending(pending, max_bytes=400)
 
     assert evicted_count == 1
     assert evicted_bytes == 200
@@ -134,7 +134,7 @@ def test_evict_pending_noop_when_under_cap(tmp_path):
     pending.mkdir()
     (pending / "a.jpg").write_bytes(b"x" * 100)
 
-    evicted_count, evicted_bytes = agent.evict_pending(tmp_path, max_bytes=1000)
+    evicted_count, evicted_bytes = agent.evict_pending(pending, max_bytes=1000)
 
     assert (evicted_count, evicted_bytes) == (0, 0)
     assert (pending / "a.jpg").exists()
@@ -188,7 +188,7 @@ def test_evict_pending_disabled_when_max_bytes_zero(tmp_path):
     pending.mkdir()
     (pending / "a.jpg").write_bytes(b"x" * 1000)
 
-    evicted_count, _ = agent.evict_pending(tmp_path, max_bytes=0)
+    evicted_count, _ = agent.evict_pending(pending, max_bytes=0)
 
     assert evicted_count == 0
     assert (pending / "a.jpg").exists()
