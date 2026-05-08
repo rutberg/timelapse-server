@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -10,6 +9,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -27,7 +27,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -37,6 +37,32 @@ from app.ssh_keys import generate_keypair, read_public_key
 from app.ssh_provision import ProvisionError, resolve_target, run_provision
 
 app = FastAPI(title="Hydroponic Timelapse Server")
+
+from app.render_queue import RenderRunner
+
+_runner: Optional[RenderRunner] = None
+
+
+def get_runner() -> RenderRunner:
+    if _runner is None:
+        raise RuntimeError("RenderRunner not started")
+    return _runner
+
+
+@app.on_event("startup")
+async def _start_render_runner() -> None:
+    global _runner
+    _runner = RenderRunner(DATA_DIR)
+    await _runner.start()
+
+
+@app.on_event("shutdown")
+async def _stop_render_runner() -> None:
+    global _runner
+    if _runner is not None:
+        await _runner.stop()
+        _runner = None
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("TIMELAPSE_DATA_DIR", "./data")).resolve()
@@ -167,7 +193,7 @@ class DslrRawConfigEntry(BaseModel):
 
 class CameraConfig(BaseModel):
     enabled: bool = True
-    interval_seconds: int = Field(900, ge=30, le=86_400)
+    interval_seconds: int = Field(900, ge=5, le=86_400)
     image_width: Optional[int] = Field(None, ge=320, le=10_000)
     image_height: Optional[int] = Field(None, ge=240, le=10_000)
     jpeg_quality: int = Field(85, ge=1, le=100)
@@ -408,11 +434,12 @@ def validate_ssh_user(value: str) -> str:
 
 
 class VideoRequest(BaseModel):
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
+    start_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     fps: int = Field(24, ge=1, le=60)
     name: Optional[str] = None
     format: str = Field("mp4", pattern=r"^(mp4|gif)$")
+    range_preset: Optional[str] = Field(None, pattern=r"^(24h|7d|all)$")
 
 
 def model_dict(model: BaseModel) -> Dict[str, Any]:
@@ -1532,207 +1559,60 @@ def delete_frame(
     return None
 
 
-@app.post("/api/cameras/{camera_id}/videos")
-async def generate_video(
-    camera_id: str,
-    request: VideoRequest,
-    http_request: Request,
-) -> StreamingResponse:
+@app.post("/api/cameras/{camera_id}/videos", status_code=202)
+async def generate_video(camera_id: str, request: VideoRequest) -> dict:
     camera_id = safe_identifier(camera_id)
+
+    if request.range_preset:
+        from app.render_queue import resolve_range_preset
+        start_iso, end_iso = resolve_range_preset(request.range_preset)
+        request.start_date = (start_iso or "")[:10] or None
+        request.end_date   = (end_iso   or "")[:10] or None
+
     images = selected_images(camera_id, request)
     if not images:
         raise HTTPException(status_code=404, detail="No images found for selection")
-
     if not shutil.which("ffmpeg"):
         raise HTTPException(status_code=500, detail="ffmpeg is not installed")
 
     video_dir = DATA_DIR / "videos" / camera_id
     video_dir.mkdir(parents=True, exist_ok=True)
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    job_id = uuid4().hex
     if request.name:
         try:
-            requested_name = safe_identifier(request.name)
+            stem = safe_identifier(request.name)
         except HTTPException as error:
-            raise HTTPException(
-                status_code=400, detail=f"Invalid video name: {error.detail}"
-            ) from error
+            raise HTTPException(status_code=400, detail=f"Invalid video name: {error.detail}") from error
     else:
-        requested_name = f"timelapse-{timestamp}"
+        from app.render_queue import unique_video_stem
+        stem = unique_video_stem(timestamp=timestamp, job_id=job_id)
 
-    output_path = video_dir / f"{requested_name}.{request.format}"
-    list_path = video_dir / f"{requested_name}.txt"
+    output_path = video_dir / f"{stem}.{request.format}"
+    list_path   = video_dir / f"{stem}.txt"
 
     with list_path.open("w", encoding="utf-8") as list_file:
         for path in images:
             list_file.write(f"file '{ffmpeg_escape(path)}'\n")
 
-    async def event_stream():
-        total_frames = len(images)
-        try:
-            if request.format == "mp4":
-                command = [
-                    "ffmpeg",
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(list_path),
-                    "-vf",
-                    f"fps={request.fps},format=yuv420p",
-                    "-c:v",
-                    "libx264",
-                    "-movflags",
-                    "+faststart",
-                    "-progress",
-                    "pipe:1",
-                    str(output_path),
-                ]
-                process = await asyncio.create_subprocess_exec(
-                    *command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                last_frame = 0
-                try:
-                    while True:
-                        if await http_request.is_disconnected():
-                            process.terminate()
-                            await process.wait()
-                            return
-                        line = await process.stdout.readline()
-                        if not line:
-                            break
-                        text = line.decode("utf-8", errors="replace").strip()
-                        if not text or "=" not in text:
-                            continue
-                        key, value = text.split("=", 1)
-                        if key == "frame":
-                            try:
-                                last_frame = int(value)
-                            except ValueError:
-                                continue
-                        elif key == "progress":
-                            percent = (
-                                min(100, round(last_frame / total_frames * 100))
-                                if total_frames
-                                else 0
-                            )
-                            yield f"event: progress\ndata: {json.dumps({'frame': last_frame, 'total': total_frames, 'percent': percent})}\n\n"
-                            if value == "end":
-                                break
-                    return_code = await process.wait()
-                    if return_code != 0:
-                        stderr = (
-                            (await process.stderr.read())
-                            .decode("utf-8", errors="replace")
-                            .strip()
-                        )
-                        yield f"event: error\ndata: {json.dumps({'detail': stderr or 'ffmpeg failed'})}\n\n"
-                        return
-                finally:
-                    if process.returncode is None:
-                        process.terminate()
-                        await process.wait()
-            else:
-                loop = asyncio.get_running_loop()
-                try:
-                    await loop.run_in_executor(
-                        None,
-                        run_ffmpeg_gif,
-                        list_path,
-                        output_path,
-                        request.fps,
-                        video_dir,
-                        requested_name,
-                    )
-                except HTTPException as exc:
-                    yield f"event: error\ndata: {json.dumps({'detail': exc.detail})}\n\n"
-                    return
-
-            yield f"event: done\ndata: {json.dumps({'path': str(output_path.relative_to(DATA_DIR))})}\n\n"
-        finally:
-            list_path.unlink(missing_ok=True)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-def run_ffmpeg_mp4(list_path: Path, output_path: Path, fps: int) -> None:
-    command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-vf",
-        f"fps={fps},format=yuv420p",
-        "-c:v",
-        "libx264",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
+    from app.render_queue import JobState
+    job = JobState(
+        id=job_id, camera_id=camera_id,
+        format=request.format, fps=request.fps,
+        start_at=request.start_date, end_at=request.end_date,
+        range_preset=request.range_preset,
+        name=stem, queued_at=time.time(),
+    )
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as error:
-        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
-
-
-def run_ffmpeg_gif(
-    list_path: Path, output_path: Path, fps: int, work_dir: Path, base_name: str
-) -> None:
-    palette_path = work_dir / f"{base_name}-palette.png"
-    palette_command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-vf",
-        f"fps={fps},scale=720:-1:flags=lanczos,palettegen",
-        str(palette_path),
-    ]
-    encode_command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-i",
-        str(palette_path),
-        "-filter_complex",
-        f"fps={fps},scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse",
-        str(output_path),
-    ]
-    try:
-        subprocess.run(palette_command, check=True, capture_output=True, text=True)
-        subprocess.run(encode_command, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as error:
-        raise HTTPException(status_code=500, detail=error.stderr.strip()) from error
-    finally:
-        palette_path.unlink(missing_ok=True)
+        position = get_runner().enqueue_with_inputs(
+            job, list_path=list_path, output_path=output_path,
+            total_frames=len(images),
+        )
+    except Exception:
+        list_path.unlink(missing_ok=True)
+        raise
+    return {"job_id": job_id, "status": "queued", "position": position}
 
 
 SUPPORTED_VIDEO_FORMATS = {".mp4": "video/mp4", ".gif": "image/gif"}
@@ -1791,6 +1671,27 @@ def delete_video(camera_id: str, filename: str) -> None:
     if path.suffix not in SUPPORTED_VIDEO_FORMATS or not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
     path.unlink(missing_ok=True)
+    return None
+
+
+@app.get("/api/renders")
+def list_renders() -> dict:
+    return get_runner().snapshot()
+
+
+@app.get("/api/renders/{job_id}")
+def get_render(job_id: str) -> dict:
+    job = get_runner().get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render not found")
+    return job.to_dict()
+
+
+@app.delete("/api/renders/{job_id}", status_code=204)
+async def cancel_render(job_id: str):
+    ok = await get_runner().cancel(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Render not found")
     return None
 
 

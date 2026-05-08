@@ -1,0 +1,320 @@
+import asyncio
+import shutil
+import time
+import pytest
+from datetime import datetime, timezone
+from app.render_queue import JobState, RenderRunner
+
+
+def test_jobstate_serializes_to_dict():
+    job = JobState(
+        id="abc123",
+        camera_id="cam-x",
+        format="mp4",
+        fps=24,
+        start_at=None,
+        end_at=None,
+        range_preset="24h",
+        name="timelapse-x",
+        queued_at=time.time(),
+    )
+    d = job.to_dict()
+    assert d["id"] == "abc123"
+    assert d["status"] == "queued"
+    assert d["range_preset"] == "24h"
+    assert d["percent"] is None
+
+
+def test_renderrunner_constructs_with_data_dir(tmp_path):
+    runner = RenderRunner(tmp_path)
+    snap = runner.snapshot()
+    assert snap == {"running": None, "queued": [], "recent": []}
+
+
+def _make_job(camera_id: str = "cam-a", fmt: str = "mp4") -> JobState:
+    return JobState(
+        id=f"id-{camera_id}-{fmt}",
+        camera_id=camera_id, format=fmt, fps=24,
+        start_at=None, end_at=None, range_preset=None,
+        name=f"timelapse-{camera_id}", queued_at=time.time(),
+    )
+
+
+def test_enqueue_two_jobs_yields_fifo_snapshot(tmp_path):
+    runner = RenderRunner(tmp_path)
+    j1 = _make_job("cam-a")
+    j2 = _make_job("cam-b")
+    assert runner.enqueue(j1) == 1
+    assert runner.enqueue(j2) == 2
+    snap = runner.snapshot()
+    assert snap["running"] is None
+    assert [q["id"] for q in snap["queued"]] == [j1.id, j2.id]
+
+
+@pytest.mark.asyncio
+async def test_worker_runs_job_to_done(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+
+    async def fake_run(job: JobState) -> None:
+        job.percent = 100
+        job.output_path = "videos/cam-a/timelapse.mp4"
+
+    monkeypatch.setattr(runner, "_run_job", fake_run)
+
+    await runner.start()
+    runner.enqueue(_make_job("cam-a"))
+    # poll until terminal (or timeout)
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        snap = runner.snapshot()
+        if snap["running"] is None and snap["recent"]:
+            break
+    await runner.stop()
+
+    snap = runner.snapshot()
+    assert snap["recent"][0]["status"] == "done"
+    assert snap["recent"][0]["output_path"] == "videos/cam-a/timelapse.mp4"
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_job_skips_when_popped(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_run(job):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(runner, "_run_job", slow_run)
+    await runner.start()
+
+    j1 = _make_job("cam-a"); j2 = _make_job("cam-b")
+    runner.enqueue(j1)
+    runner.enqueue(j2)
+    await started.wait()                          # j1 is running
+    assert await runner.cancel(j2.id) is True     # cancel queued j2
+    release.set()                                 # let j1 finish
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if runner._current_id is None and not runner._order:
+            break
+    await runner.stop()
+
+    statuses = {j.id: j.status for j in runner._jobs.values()}
+    assert statuses[j1.id] == "done"
+    assert statuses[j2.id] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_job_disappears_from_snapshot_immediately(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_run(job):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(runner, "_run_job", slow_run)
+    await runner.start()
+    j1 = _make_job("cam-a"); j2 = _make_job("cam-b")
+    runner.enqueue(j1)
+    runner.enqueue(j2)
+    await started.wait()
+    assert [q["id"] for q in runner.snapshot()["queued"]] == [j2.id]
+    assert await runner.cancel(j2.id) is True
+    # snapshot should reflect the cancellation now, not after j1 finishes
+    snap = runner.snapshot()
+    assert snap["queued"] == []
+    assert runner._jobs[j2.id].status == "cancelled"
+    release.set()
+    await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_job_terminates(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+
+    started = asyncio.Event()
+
+    class FakeProc:
+        def __init__(self): self.returncode = None; self._terminated = False
+        def terminate(self): self._terminated = True; self.returncode = -15
+        async def wait(self): return self.returncode
+
+    fake_proc = FakeProc()
+
+    async def run(job):
+        runner._current_proc = fake_proc  # simulate the real ffmpeg attachment
+        started.set()
+        # cooperatively wait for cancellation
+        while not job.cancel_requested:
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(runner, "_run_job", run)
+    await runner.start()
+    j1 = _make_job("cam-a")
+    runner.enqueue(j1)
+    await started.wait()
+    assert await runner.cancel(j1.id) is True
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if runner._jobs[j1.id].status == "cancelled":
+            break
+    await runner.stop()
+
+    assert runner._jobs[j1.id].status == "cancelled"
+    assert fake_proc._terminated is True
+
+
+@pytest.mark.asyncio
+async def test_reaper_evicts_old_terminal_jobs(tmp_path, monkeypatch):
+    runner = RenderRunner(tmp_path)
+    # speed up reaper by patching the constant *and* adding a tiny tick
+    monkeypatch.setattr("app.render_queue.RECENT_TTL_SECONDS", 0.05)
+
+    j = _make_job("cam-a")
+    runner._jobs[j.id] = j
+    j.status = "done"
+    j.finished_at = time.time() - 1.0  # already old
+
+    await runner.start()
+    await asyncio.sleep(0.2)            # one reaper cycle
+    await runner.stop()
+
+    assert j.id not in runner._jobs
+
+
+@pytest.mark.asyncio
+async def test_run_job_mp4_produces_file_and_progress(tmp_path):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+
+    cam_dir = tmp_path / "images" / "cam-a" / "2026-05-04"
+    cam_dir.mkdir(parents=True)
+    minimal_jpeg = bytes.fromhex(
+        "ffd8ffe000104a46494600010200000100010000fffe0010"
+        "4c61766335392e33372e31303000ffdb00430008040404"
+        "04040505050505050606060606060606060606060607070"
+        "70708080807070706060707080808080909090808080809"
+        "090a0a0a0c0c0b0b0e0e0e111114ffc4004b0001010000"
+        "0000000000000000000000000008010100000000000000"
+        "00000000000000000010010000000000000000000000000"
+        "0000000110100000000000000000000000000000000ffc0"
+        "0011080002000203012200021100031100ffda000c030100"
+        "02110311003f009fc007ffd9"
+    )
+    (cam_dir / "143000.jpg").write_bytes(minimal_jpeg)
+    (cam_dir / "143005.jpg").write_bytes(minimal_jpeg)
+
+    list_path = tmp_path / "list.txt"
+    list_path.write_text(
+        f"file '{cam_dir / '143000.jpg'}'\nfile '{cam_dir / '143005.jpg'}'\n"
+    )
+    out = tmp_path / "out.mp4"
+
+    runner = RenderRunner(tmp_path)
+    job = _make_job("cam-a", "mp4")
+    runner.enqueue_with_inputs(
+        job, list_path=list_path, output_path=out, total_frames=2
+    )
+    await runner.start()
+    for _ in range(2000):
+        await asyncio.sleep(0.01)
+        if runner.snapshot()["running"] is None and runner.snapshot()["recent"]:
+            break
+    await runner.stop()
+
+    rec = runner.snapshot()["recent"][0]
+    assert rec["status"] == "done", rec
+    assert out.exists()
+    assert rec["percent"] == 100
+
+
+@pytest.mark.asyncio
+async def test_run_job_gif_produces_file(tmp_path):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    cam_dir = tmp_path / "images" / "cam-b" / "2026-05-04"
+    cam_dir.mkdir(parents=True)
+    minimal_jpeg = bytes.fromhex(
+        "ffd8ffe000104a46494600010200000100010000fffe0010"
+        "4c61766335392e33372e31303000ffdb00430008040404"
+        "04040505050505050606060606060606060606060607070"
+        "70708080807070706060707080808080909090808080809"
+        "090a0a0a0c0c0b0b0e0e0e111114ffc4004b0001010000"
+        "0000000000000000000000000008010100000000000000"
+        "00000000000000000010010000000000000000000000000"
+        "0000000110100000000000000000000000000000000ffc0"
+        "0011080002000203012200021100031100ffda000c030100"
+        "02110311003f009fc007ffd9"
+    )
+    (cam_dir / "143000.jpg").write_bytes(minimal_jpeg)
+    (cam_dir / "143005.jpg").write_bytes(minimal_jpeg)
+
+    list_path = tmp_path / "list.txt"
+    list_path.write_text(
+        f"file '{cam_dir / '143000.jpg'}'\nfile '{cam_dir / '143005.jpg'}'\n"
+    )
+    out = tmp_path / "out.gif"
+
+    runner = RenderRunner(tmp_path)
+    job = _make_job("cam-b", "gif")
+    runner.enqueue_with_inputs(
+        job, list_path=list_path, output_path=out, total_frames=2
+    )
+    await runner.start()
+    for _ in range(3000):
+        await asyncio.sleep(0.01)
+        if runner.snapshot()["running"] is None and runner.snapshot()["recent"]:
+            break
+    await runner.stop()
+
+    rec = runner.snapshot()["recent"][0]
+    assert rec["status"] == "done", rec
+    assert out.exists()
+    assert rec["percent"] == 100
+
+
+from app.render_queue import resolve_range_preset, unique_video_stem
+
+
+def test_range_preset_24h(monkeypatch):
+    fixed = datetime(2026, 5, 7, 12, 0, 0, tzinfo=timezone.utc)
+    start, end = resolve_range_preset("24h", now=fixed)
+    assert end == "2026-05-07T12:00:00+00:00"
+    assert start == "2026-05-06T12:00:00+00:00"
+
+
+def test_range_preset_all_returns_none():
+    assert resolve_range_preset("all") == (None, None)
+
+
+def test_range_preset_unknown_raises():
+    with pytest.raises(ValueError):
+        resolve_range_preset("month")
+
+
+def test_unique_video_stem_appends_suffix():
+    stem = unique_video_stem(timestamp="20260507T120000Z", job_id="abcdef1234")
+    assert stem == "timelapse-20260507T120000Z-abcdef"
+
+
+def test_renders_endpoint_returns_snapshot(client):
+    r = client.get("/api/renders")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"running": None, "queued": [], "recent": []}
+
+
+def test_render_lookup_404_for_unknown_job(client):
+    r = client.get("/api/renders/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_cancel_unknown_job_returns_404(client):
+    r = client.delete("/api/renders/does-not-exist")
+    assert r.status_code == 404

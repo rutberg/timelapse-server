@@ -41,6 +41,7 @@ export function openRenderModal(cameraId, initialRangeHours = 24) {
         busy = false,
         progress = 0,
         message = "";
+    let active = true;
 
     let startDate,
         startHour,
@@ -128,6 +129,7 @@ export function openRenderModal(cameraId, initialRangeHours = 24) {
         <div style="margin-top:14px">
           <progress value="${progress}" max="100" style="width:100%"></progress>
           <div class="mono small" style="text-align:center;margin-top:4px">${progress}%</div>
+          <p class="small soft" style="margin-top:4px">You can close this — the render will keep going. Manage it from the sidebar.</p>
         </div>` : ""}
         ${message ? `<div class="small" style="margin-top:14px;color:${message.startsWith("Error") ? "var(--red)" : "var(--green)"}">${escapeHtml(message)}</div>` : ""}
       </div>
@@ -137,7 +139,8 @@ export function openRenderModal(cameraId, initialRangeHours = 24) {
       </div>`;
     }
 
-    modal = openModal(html());
+    active = true;
+    modal = openModal(html(), { onClose: () => { active = false; } });
     function rerender() {
         modal.root.querySelector(".modal").innerHTML = html();
         wire();
@@ -188,48 +191,44 @@ export function openRenderModal(cameraId, initialRangeHours = 24) {
         modal.root
             .querySelector("#r-go")
             ?.addEventListener("click", async () => {
-                busy = true;
-                progress = 0;
-                message = "";
+                busy = true; progress = 0; message = "";
                 rerender();
                 try {
-                    const startAt = `${startDate}T${startHour.toString().padStart(2, "0")}:00:00`;
-                    const endAt = `${endDate}T${endHour.toString().padStart(2, "0")}:59:59`;
                     const response = await fetch(`/api/cameras/${encId}/videos`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ start_at: startAt, end_at: endAt, fps, format }),
+                        body: JSON.stringify({
+                            start_date: startDate, end_date: endDate, fps, format,
+                        }),
                     });
-                    if (!response.ok || !response.body) {
-                        throw new Error((await response.text()) || "Failed to render video");
+                    if (!response.ok) {
+                        const err = await response.json().catch(() => ({}));
+                        throw new Error(err.detail || "Failed to enqueue render");
                     }
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = "";
-                    while (true) {
-                        const { value, done } = await reader.read();
-                        if (done) break;
-                        buffer += decoder.decode(value, { stream: true });
-                        const events = buffer.split("\n\n");
-                        buffer = events.pop() || "";
-                        for (const rawEvent of events) {
-                            const lines = rawEvent.split("\n");
-                            const eventType = lines.find((l) => l.startsWith("event:"))?.slice(6).trim();
-                            const dataLine = lines.find((l) => l.startsWith("data:"))?.slice(5).trim();
-                            if (!eventType || !dataLine) continue;
-                            const data = JSON.parse(dataLine);
-                            if (eventType === "progress") {
-                                progress = data.percent;
-                                rerender();
-                            } else if (eventType === "done") {
-                                message = `Rendered ${data.path}`;
-                                busy = false;
-                                progress = 100;
-                                rerender();
-                            } else if (eventType === "error") {
-                                throw new Error(data.detail || "Render failed");
-                            }
+                    const { job_id } = await response.json();
+
+                    while (active) {
+                        await new Promise((r) => setTimeout(r, 1500));
+                        if (!active) return;
+                        const r = await fetch(`/api/renders/${encodeURIComponent(job_id)}`);
+                        if (!r.ok) throw new Error("Lost track of render");
+                        const job = await r.json();
+                        progress = job.percent ?? progress;
+                        if (job.status === "done") {
+                            busy = false; progress = 100;
+                            message = `Rendered ${job.output_path}`;
+                            rerender();
+                            return;
                         }
+                        if (job.status === "failed") {
+                            throw new Error(job.error || "Render failed");
+                        }
+                        if (job.status === "cancelled") {
+                            busy = false; message = "Cancelled.";
+                            rerender();
+                            return;
+                        }
+                        rerender();
                     }
                 } catch (e) {
                     busy = false;
