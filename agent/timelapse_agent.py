@@ -1504,6 +1504,10 @@ def next_due_time(last_capture: Optional[float], interval_seconds: int, now: flo
 def run_agent(settings: Dict[str, Any]) -> None:
     work_dir = Path(settings.get("work_dir", "/var/lib/timelapse-agent"))
     work_dir.mkdir(parents=True, exist_ok=True)
+    ram_dir, spill_dir = resolve_pending_dirs(settings, work_dir)
+    ram_dir.mkdir(parents=True, exist_ok=True)
+    if spill_dir != ram_dir:
+        spill_dir.mkdir(parents=True, exist_ok=True)
     cache_path = work_dir / "server-config.json"
 
     poll_seconds = int(settings.get("config_poll_seconds", 60))
@@ -1515,8 +1519,8 @@ def run_agent(settings: Dict[str, Any]) -> None:
     next_config_poll = time.monotonic() + poll_seconds
 
     logging.info(
-        "Agent v%s started for camera_id=%s (max_pending_bytes=%s)",
-        AGENT_VERSION, settings["camera_id"], max_pending_bytes,
+        "Agent v%s started for camera_id=%s (ram_dir=%s spill_dir=%s max_pending_bytes=%s)",
+        AGENT_VERSION, settings["camera_id"], ram_dir, spill_dir, max_pending_bytes,
     )
     active_backend = resolve_active_backend(remote_config)
     state.active_backend = active_backend
@@ -1536,7 +1540,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
         pending = remote_config.get("dslr_pending_discovery")
         if pending and pending.get("token") != state.last_discovery_token:
             run_dslr_discovery(settings, state, pending["token"])
-    state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
+    state.pending_count, state.pending_bytes = measure_pending(ram_dir, spill_dir)
     state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
     state.local_hour = startup_now.hour
@@ -1564,7 +1568,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
             if new_interval != previous_interval:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
-            state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
+            state.pending_count, state.pending_bytes = measure_pending(ram_dir, spill_dir)
             state.pending_count += measure_camera_pending(work_dir)
             if state.active_backend == "gphoto2":
                 dslr_config = remote_config.get("dslr") or {}
@@ -1591,8 +1595,8 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 return
             next_config_poll = now + poll_seconds
 
-        upload_pending(settings, work_dir, work_dir / "pending", work_dir / "pending", state)
-        state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
+        upload_pending(settings, work_dir, ram_dir, spill_dir, state)
+        state.pending_count, state.pending_bytes = measure_pending(ram_dir, spill_dir)
         state.pending_count += measure_camera_pending(work_dir)
 
         enabled = bool(remote_config.get("enabled", True))
@@ -1662,7 +1666,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                     prop_map=remote_config.get("dslr_property_map"),
                 )
             try:
-                image_path = capture_frame(work_dir / "pending", remote_config)
+                image_path = capture_frame(ram_dir, remote_config)
                 state.last_capture_at = now_local_iso()
                 state.last_error = None
                 logging.info("Captured %s", image_path.name)
@@ -1672,14 +1676,14 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 next_capture = now + min(300, interval_seconds)
             else:
                 last_capture = time.monotonic()
-                evicted_count, evicted_bytes = evict_pending(work_dir / "spill", max_pending_bytes)
+                evicted_count, evicted_bytes = evict_pending(spill_dir, max_pending_bytes)
                 if evicted_count:
                     logging.warning(
                         "Evicted %d oldest pending captures (%d bytes) to stay under %d-byte cap",
                         evicted_count, evicted_bytes, max_pending_bytes,
                     )
-                upload_pending(settings, work_dir, work_dir / "pending", work_dir / "pending", state)
-                state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
+                upload_pending(settings, work_dir, ram_dir, spill_dir, state)
+                state.pending_count, state.pending_bytes = measure_pending(ram_dir, spill_dir)
                 state.pending_count += measure_camera_pending(work_dir)
                 next_capture = last_capture + interval_seconds
 
