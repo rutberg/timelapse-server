@@ -111,6 +111,23 @@ def resolve_max_pending_bytes(settings: Dict[str, Any], work_dir: Path) -> int:
     return int(configured)
 
 
+def resolve_pending_dirs(
+    settings: Dict[str, Any], work_dir: Path
+) -> tuple[Path, Path]:
+    """Return (ram_dir, spill_dir).
+
+    If 'ram_pending_dir' is set in settings, captures write to that path
+    (typically a tmpfs) and failures spill to work_dir/spill/.
+    If absent, both paths are work_dir/pending/ — legacy single-tier behaviour,
+    no spill directory is used.
+    """
+    configured = settings.get("ram_pending_dir")
+    if configured:
+        return Path(configured), work_dir / "spill"
+    pending = work_dir / "pending"
+    return pending, pending
+
+
 def solar_window(
     today: date,
     latitude: float,
