@@ -8,6 +8,8 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/timelapse-agent/current/timelapse_agent.py --config /etc/timelapse-agent/config.json
 Restart=always
 RestartSec=10
+RuntimeDirectory=timelapse-agent
+RuntimeDirectorySize=256M
 
 [Install]
 WantedBy=multi-user.target
