@@ -1348,10 +1348,12 @@ def now_local_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
+def capture_frame(ram_dir: Path, config: Dict[str, Any]) -> Path:
     """Trigger a capture using the configured backend.
 
-    Always returns a pathlib.Path to a JPEG written under work_dir/pending/.
+    Writes the captured JPEG into ram_dir (typically a tmpfs directory).
+    The caller is responsible for creating ram_dir before calling this function.
+    Returns the Path to the new JPEG file.
     """
     backend = resolve_active_backend(config)
     if backend is None:
@@ -1361,7 +1363,7 @@ def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
         )
 
     captured_at_filename = datetime.now().strftime("%Y%m%dT%H%M%S")
-    output_path = work_dir / "pending" / f"{captured_at_filename}.jpg"
+    output_path = ram_dir / f"{captured_at_filename}.jpg"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(".tmp.jpg")
 
@@ -1398,10 +1400,10 @@ def capture_frame(work_dir: Path, config: Dict[str, Any]) -> Path:
         write_json(output_path.with_suffix(".json"), metadata)
         return output_path
 
-    # rpicam path (unchanged behaviour)
+    # rpicam path
     command = find_capture_command()
     captured_at_filename = datetime.now().strftime("%Y%m%dT%H%M%S")
-    output_path = work_dir / "pending" / f"{captured_at_filename}.jpg"
+    output_path = ram_dir / f"{captured_at_filename}.jpg"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(".tmp.jpg")
 
@@ -1660,7 +1662,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                     prop_map=remote_config.get("dslr_property_map"),
                 )
             try:
-                image_path = capture_frame(work_dir, remote_config)
+                image_path = capture_frame(work_dir / "pending", remote_config)
                 state.last_capture_at = now_local_iso()
                 state.last_error = None
                 logging.info("Captured %s", image_path.name)

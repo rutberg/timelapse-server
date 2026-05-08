@@ -310,13 +310,13 @@ class TestCaptureFrameGphoto2Branch:
 
         with patch("timelapse_agent.resolve_active_backend", return_value="gphoto2"), \
              patch("timelapse_agent.subprocess.run", side_effect=fake_run):
-            result = capture_frame(tmp_path, config)
+            result = capture_frame(tmp_path / "pending", config)
         assert isinstance(result, Path)
         assert result.suffix == ".jpg"
         assert result.parent == tmp_path / "pending"
 
     def test_rpicam_capture_path_unchanged(self, tmp_path):
-        # When backend is rpicam, capture_frame should still write to pending/.
+        # When backend is rpicam, capture_frame writes to the given ram_dir.
         config = {"camera_backend": "rpicam", "jpeg_quality": 85}
 
         def fake_run(cmd, **kwargs):
@@ -328,7 +328,7 @@ class TestCaptureFrameGphoto2Branch:
         with patch("timelapse_agent.resolve_active_backend", return_value="rpicam"), \
              patch("timelapse_agent.find_capture_command", return_value="/usr/bin/rpicam-still"), \
              patch("timelapse_agent.subprocess.run", side_effect=fake_run):
-            result = capture_frame(tmp_path, config)
+            result = capture_frame(tmp_path / "pending", config)
         assert isinstance(result, Path)
         assert result.suffix == ".jpg"
         assert result.parent == tmp_path / "pending"

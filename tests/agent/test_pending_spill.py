@@ -169,3 +169,23 @@ def test_upload_pending_single_tier_success_deletes_file(tmp_path):
             agent.upload_pending(_fake_settings(), tmp_path, pending, pending, state)
 
     assert not jpg.exists()
+
+
+def test_capture_frame_writes_to_ram_dir(tmp_path):
+    """capture_frame must write the JPEG to the configured ram_dir, not work_dir/pending."""
+    ram_dir = tmp_path / "run" / "pending"
+    config = {"camera_backend": "rpicam", "jpeg_quality": 85}
+
+    def fake_run(cmd, **kwargs):
+        output_arg = cmd[cmd.index("--output") + 1] if "--output" in cmd else cmd[cmd.index("-o") + 1]
+        Path(output_arg).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        return MagicMock(returncode=0)
+
+    with patch("timelapse_agent.resolve_active_backend", return_value="rpicam"), \
+         patch("timelapse_agent.find_capture_command", return_value="/usr/bin/rpicam-still"), \
+         patch("timelapse_agent.subprocess.run", side_effect=fake_run):
+        result = agent.capture_frame(ram_dir, config)
+
+    assert result.parent == ram_dir
+    assert result.suffix == ".jpg"
+    assert result.exists()
