@@ -236,18 +236,20 @@ def is_in_schedule(
     return hour_in_schedule(now, capture_hours)
 
 
-def measure_pending(work_dir: Path) -> tuple[int, int]:
-    pending_dir = work_dir / "pending"
-    if not pending_dir.exists():
-        return (0, 0)
+def measure_pending(ram_dir: Path, spill_dir: Path) -> tuple[int, int]:
+    """Count and size all queued JPEGs across both pending tiers."""
     count = 0
     total = 0
-    for entry in pending_dir.glob("*.jpg"):
-        try:
-            total += entry.stat().st_size
-        except OSError:
+    dirs = {ram_dir, spill_dir}  # set deduplicates when single-tier
+    for d in dirs:
+        if not d.exists():
             continue
-        count += 1
+        for entry in d.glob("*.jpg"):
+            try:
+                total += entry.stat().st_size
+            except OSError:
+                continue
+            count += 1
     return (count, total)
 
 
@@ -1494,7 +1496,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
         pending = remote_config.get("dslr_pending_discovery")
         if pending and pending.get("token") != state.last_discovery_token:
             run_dslr_discovery(settings, state, pending["token"])
-    state.pending_count, state.pending_bytes = measure_pending(work_dir)
+    state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
     state.pending_count += measure_camera_pending(work_dir)
     startup_now = datetime.now().astimezone()
     state.local_hour = startup_now.hour
@@ -1522,7 +1524,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
             if new_interval != previous_interval:
                 next_capture = next_due_time(last_capture, new_interval, now)
                 logging.info("Capture interval changed to %s seconds", new_interval)
-            state.pending_count, state.pending_bytes = measure_pending(work_dir)
+            state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
             state.pending_count += measure_camera_pending(work_dir)
             if state.active_backend == "gphoto2":
                 dslr_config = remote_config.get("dslr") or {}
@@ -1550,7 +1552,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
             next_config_poll = now + poll_seconds
 
         upload_pending(settings, work_dir, state)
-        state.pending_count, state.pending_bytes = measure_pending(work_dir)
+        state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
         state.pending_count += measure_camera_pending(work_dir)
 
         enabled = bool(remote_config.get("enabled", True))
@@ -1637,7 +1639,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                         evicted_count, evicted_bytes, max_pending_bytes,
                     )
                 upload_pending(settings, work_dir, state)
-                state.pending_count, state.pending_bytes = measure_pending(work_dir)
+                state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
                 state.pending_count += measure_camera_pending(work_dir)
                 next_capture = last_capture + interval_seconds
 

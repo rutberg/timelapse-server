@@ -99,13 +99,13 @@ def test_measure_pending_counts_jpgs_only(tmp_path):
     (pending / "b.jpg").write_bytes(b"x" * 250)
     (pending / "c.json").write_bytes(b"{}")  # sidecar metadata, ignored
 
-    count, total = agent.measure_pending(tmp_path)
+    count, total = agent.measure_pending(tmp_path / "pending", tmp_path / "pending")
     assert count == 2
     assert total == 350
 
 
 def test_measure_pending_returns_zero_when_dir_missing(tmp_path):
-    count, total = agent.measure_pending(tmp_path)
+    count, total = agent.measure_pending(tmp_path / "pending", tmp_path / "pending")
     assert count == 0
     assert total == 0
 
