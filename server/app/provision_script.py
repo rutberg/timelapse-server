@@ -38,6 +38,7 @@ def build_install_script(
             "server_url": server_url,
             "config_poll_seconds": 60,
             "work_dir": "/var/lib/timelapse-agent",
+            "ram_pending_dir": "/run/timelapse-agent/pending",
         },
         indent=2,
     )

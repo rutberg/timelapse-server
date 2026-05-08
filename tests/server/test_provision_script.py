@@ -123,3 +123,12 @@ def test_script_rejects_invalid_ssh_user():
             agent_version="0.3.0",
             ssh_user="root; rm -rf /",
         )
+
+
+def test_script_includes_ram_pending_dir_for_tmpfs_queue():
+    script = build_install_script(
+        camera_id="x",
+        server_url="http://x:8080",
+        agent_version="0.3.0",
+    )
+    assert '"ram_pending_dir": "/run/timelapse-agent/pending"' in script
