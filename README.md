@@ -2,7 +2,7 @@
 
 # Timelapse System
 
-A lightweight, server-controlled timelapse system designed for Raspberry Pi Zero W (or other Pi models) with the Raspberry Pi Camera Module.
+A lightweight, server-controlled timelapse system for Raspberry Pi, supporting both the Raspberry Pi Camera Module and USB-tethered DSLRs.
 
 ## Overview
 
@@ -32,7 +32,7 @@ After install, browse to `http://<SERVER_IP>:<PORT>/` from any LAN host. The UI 
 
 - **Cameras** - auto-refreshing status tiles for every camera that has checked in.
 - **Add agent** - three-step wizard (form -> flash with Imager -> SSH provision) backed by `/api/agents`.
-- **Camera detail** - capture settings, latest image preview, video render button, and `desired_agent_version` for rolling out updates.
+- **Camera detail** - capture settings, latest image preview, video render button, and `desired_agent_version` for rolling out updates. You can also **feature** specific cameras to pin them to the top of the dashboard and add **location labels** for easier identification.
 
 The UI is served from `/static/` and uses Alpine.js + pico.css. Both are vendored, so the LXC works offline.
 
@@ -146,8 +146,18 @@ Trigger video generation for a specific camera:
 ```bash
 curl -X POST http://<SERVER_IP>:8080/api/cameras/<CAMERA_ID>/videos \
   -H 'Content-Type: application/json' \
-  -d '{"fps": 24}'
+  -d '{
+    "fps": 24,
+    "format": "mp4",
+    "range_preset": "7d"
+  }'
 ```
+
+Supported options:
+- **`format`**: `mp4` (default) or `gif`.
+- **`fps`**: Frames per second (1–60).
+- **`range_preset`**: `24h` (last 24 hours), `7d` (last 7 days), or `all` (everything).
+- **`start_date`** / **`end_date`**: Custom range in `YYYY-MM-DD` format.
 
 ### Releasing a new agent version
 
@@ -184,32 +194,45 @@ sudo systemctl restart timelapse-server
 
 ## DSLR cameras (gphoto2 backend)
 
-The agent supports two capture backends: `rpicam` for Pi Camera modules and `gphoto2` for USB-tethered DSLRs (tested with the Canon R6). The active backend is auto-detected unless `CameraConfig.camera_backend` is pinned.
+The agent supports two capture backends: `rpicam` for Pi Camera modules and `gphoto2` for USB-tethered DSLRs. The active backend is auto-detected unless `CameraConfig.camera_backend` is pinned.
 
-### Data model
+### Dynamic Property Mapping
 
-When `active_backend == "gphoto2"`, every checkin includes a `dslr` payload populated by `gphoto2_read_choices_and_current()`, `gphoto2_read_current_values()`, and `gphoto2_read_telemetry()` in `agent/timelapse_agent.py`:
+Unlike the Raspberry Pi camera which has a fixed set of controls, every DSLR model exposes a different set of keys and values via `gphoto2`. The system uses a **Property Map** to bridge these differences:
 
-| Field | Source | Refreshed |
-|---|---|---|
-| `battery_level`, `available_shots`, `shutter_counter`, `exposure_mode`, `lens_name` | `gphoto2 --get-config <key>` `Current:` line | every poll |
-| `choices` (per-setting option lists) | `gphoto2 --get-config` `Choice:` lines | only on init/reinit |
-| `current_values` (per-setting active value) | `gphoto2 --get-config` `Current:` line | every poll |
-| `last_reinit_token`, `last_init_at` | agent state | on reinit |
+1.  **Vendor Support:** Tailored support for Canon, Nikon, Sony, Fuji, Olympus, and Panasonic bodies.
+2.  **Telemetry Tiles:** Dynamically rendered UI tiles for battery level, shutter count, lens name, and available shots, mapped to the correct vendor-specific PTP keys.
+3.  **Capture Settings:** Mapped dropdowns for Shutter Speed, Aperture, ISO, and White Balance. It handles cases where read and write keys differ (e.g., Nikon's `shutterspeed` vs `shutterspeed2`).
+4.  **Initialization Keys:** Critical startup settings like `capturetarget` (SD card vs Internal) and `focusmode` are managed via the Property Map.
 
-`CameraConfig.dslr` (a `DslrSettings`) holds the user's saved selections plus a `reinit_token`. To trigger a re-initialization, the UI writes a fresh ISO-timestamp into `reinit_token`; the agent compares it against `state.last_reinit_token` on the next poll and, on mismatch, calls `gphoto2_apply_init_settings()` then re-reads choices and current values.
+### DSLR Discovery
 
-### UI rendering
+To support a new or unknown camera body, the UI provides a **Re-run discovery** feature:
 
-The DSLR section in the camera Settings tab (`server/app/static/v2/views/camera.js` → `renderDslrSection`) only renders when `cfg.camera_backend === 'gphoto2'` **or** `status.active_backend === 'gphoto2'`. Dropdowns pre-select `current_values[gphotoKey]` first, falling back to the saved `dslrCfg[field]`. The Re-initialize button surfaces a phase tracker (`saving → waiting → done`) that survives page reloads via the camera's `reinit_token` / `last_reinit_token` mismatch.
+1.  The server issues a discovery token to the agent.
+2.  The agent runs `gphoto2 --list-all-config` to dump every property the camera supports.
+3.  The agent posts this raw tree back to the server.
+4.  The server parses the tree and proposes a new Property Map based on a flat priority list of known vendor keys.
+5.  Once confirmed in the UI, the map is saved to the camera's configuration and used for all subsequent UI rendering and capture commands.
+
+### Provisioning for USB Cameras
+
+The automated provisioning process (`Provision Agent` in the UI) automatically handles the extra complexity of USB-tethered cameras:
+- **Dependencies:** Installs `gphoto2` and the `libgphoto2` runtime.
+- **Udev Rules:** Writes a custom udev rule (`06-still-image.rules`) to grant the `pi` user permission to access any USB Still Image device (Class 06).
+- **Process Locking:** Masks the `gvfs-gphoto2-volume-monitor` systemd service to prevent the OS from auto-mounting the camera and locking out the capture agent.
 
 ### Testing without hardware
 
-`scripts/simulate-dslr.sh` posts a realistic Canon R6 fixture (lens name, full `choices`/`current_values`, battery, shutter count) and applies any new `reinit_token` after a 1s delay so the full re-init flow is exercisable. Run it against the dev server and the `dslr-test` camera will show populated dropdowns and the lens line within one tick.
+`scripts/simulate-dslr.sh` can simulate the full DSLR lifecycle, including checkins, telemetry updates, and discovery:
 
 ```bash
+# Simulate a Canon R6 on a camera named 'dslr-test'
 ./scripts/simulate-dslr.sh dslr-test http://127.0.0.1:8080 30
 ```
+
+The simulator posts realistic fixtures that exercise the Property Map rendering and the re-initialization flow.
+
 
 ---
 
