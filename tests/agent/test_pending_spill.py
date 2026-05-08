@@ -84,3 +84,88 @@ def test_evict_pending_zero_means_unlimited(tmp_path):
 def test_evict_pending_missing_dir_is_noop(tmp_path):
     count, _ = agent.evict_pending(tmp_path / "spill", max_bytes=100)
     assert count == 0
+
+
+import json as _json
+from unittest.mock import patch, MagicMock
+from urllib.error import URLError
+
+
+def _fake_settings():
+    return {"camera_id": "cam1", "server_url": "http://server.local:8081"}
+
+
+def _make_jpg(directory: Path, name: str, size: int = 100) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    p = directory / name
+    p.write_bytes(b"J" * size)
+    p.with_suffix(".json").write_text(
+        _json.dumps({"captured_at": "2026-01-01T00:00:00+00:00"})
+    )
+    return p
+
+
+def test_upload_pending_drains_spill_before_ram(tmp_path):
+    """Spill files must be uploaded before RAM files (chronological order)."""
+    spill = tmp_path / "spill"
+    ram = tmp_path / "ram"
+    _make_jpg(spill, "20260101T000000.jpg")  # older
+    _make_jpg(ram,   "20260101T000001.jpg")  # newer
+    uploaded = []
+
+    def fake_post(url, path, captured_at, **kw):
+        uploaded.append(path.parent.name)  # "spill" or "ram"
+
+    state = agent.AgentState()
+    with patch.object(agent, "post_multipart", side_effect=fake_post):
+        agent.upload_pending(_fake_settings(), tmp_path, ram, spill, state)
+
+    assert uploaded == ["spill", "ram"]
+    assert not (spill / "20260101T000000.jpg").exists()
+    assert not (ram   / "20260101T000001.jpg").exists()
+
+
+def test_upload_pending_moves_ram_failure_to_spill(tmp_path):
+    """On upload failure from RAM, the file moves to spill (not deleted)."""
+    spill = tmp_path / "spill"
+    ram = tmp_path / "ram"
+    jpg = _make_jpg(ram, "20260101T000002.jpg")
+
+    def fake_post(url, path, captured_at, **kw):
+        raise URLError("connection refused")
+
+    state = agent.AgentState()
+    with patch.object(agent, "post_multipart", side_effect=fake_post):
+        agent.upload_pending(_fake_settings(), tmp_path, ram, spill, state)
+
+    assert not jpg.exists()                          # gone from RAM
+    assert (spill / "20260101T000002.jpg").exists()  # landed in spill
+    assert (spill / "20260101T000002.json").exists() # sidecar moved too
+    assert "upload failed" in state.last_error
+
+
+def test_upload_pending_single_tier_failure_leaves_file(tmp_path):
+    """In single-tier mode (ram==spill), failure leaves file in place (legacy)."""
+    pending = tmp_path / "pending"
+    jpg = _make_jpg(pending, "20260101T000003.jpg")
+
+    def fake_post(url, path, captured_at, **kw):
+        raise URLError("connection refused")
+
+    state = agent.AgentState()
+    with patch.object(agent, "post_multipart", side_effect=fake_post):
+        agent.upload_pending(_fake_settings(), tmp_path, pending, pending, state)
+
+    assert jpg.exists()  # file stays in place in single-tier mode
+
+
+def test_upload_pending_single_tier_success_deletes_file(tmp_path):
+    pending = tmp_path / "pending"
+    jpg = _make_jpg(pending, "20260101T000004.jpg")
+
+    state = agent.AgentState()
+    with patch.object(agent, "post_multipart", return_value=None):
+        with patch.object(agent, "upload_camera_pending", return_value=None):
+            agent.upload_pending(_fake_settings(), tmp_path, pending, pending, state)
+
+    assert not jpg.exists()

@@ -1429,31 +1429,66 @@ def fetch_remote_config(settings: Dict[str, Any], cache_path: Path) -> Dict[str,
         return DEFAULT_REMOTE_CONFIG.copy()
 
 
-def upload_pending(settings: Dict[str, Any], work_dir: Path, state: AgentState) -> None:
-    """Drain both the local pending/ directory (rpicam path) and the camera-
-    resident pending queue (gphoto2 path). Either may be empty."""
-    pending_dir = work_dir / "pending"
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    url = settings["server_url"].rstrip("/") + f"/api/cameras/{settings['camera_id']}/upload"
+def upload_pending(
+    settings: Dict[str, Any],
+    work_dir: Path,
+    ram_dir: Path,
+    spill_dir: Path,
+    state: AgentState,
+) -> None:
+    """Drain both pending tiers and the camera-resident queue.
 
-    for image_path in sorted(pending_dir.glob("*.jpg")):
-        metadata_path = image_path.with_suffix(".json")
-        metadata = load_json(metadata_path) if metadata_path.exists() else {}
-        captured_at = metadata.get("captured_at", now_local_iso())
+    Order: spill (SD, older) → ram (RAM, newer) → camera queue.
+    On upload failure from the RAM tier the file is moved to spill so it
+    survives a restart. In single-tier mode (ram_dir == spill_dir) a
+    failure is left in place exactly as before.
+    """
+    url = (
+        settings["server_url"].rstrip("/")
+        + f"/api/cameras/{settings['camera_id']}/upload"
+    )
 
-        try:
-            post_multipart(url, image_path, captured_at)
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
-            logging.warning("Upload failed for %s: %s", image_path.name, error)
-            state.last_error = f"upload failed: {error}"
-            return
+    def _upload_dir(directory: Path, on_failure: str) -> bool:
+        """Upload all JPEGs in directory. Return False and stop on first failure.
 
-        image_path.unlink(missing_ok=True)
-        metadata_path.unlink(missing_ok=True)
-        state.last_upload_at = now_local_iso()
-        state.last_error = None
-        logging.info("Uploaded %s", image_path.name)
+        on_failure: 'spill' moves the failed file to spill_dir;
+                    'leave' leaves it in place (single-tier / spill tier itself).
+        """
+        if not directory.exists():
+            return True
+        for image_path in sorted(directory.glob("*.jpg")):
+            metadata_path = image_path.with_suffix(".json")
+            metadata = load_json(metadata_path) if metadata_path.exists() else {}
+            captured_at = metadata.get("captured_at", now_local_iso())
+            try:
+                post_multipart(url, image_path, captured_at)
+            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+                logging.warning("Upload failed for %s: %s", image_path.name, error)
+                state.last_error = f"upload failed: {error}"
+                if on_failure == "spill" and directory != spill_dir:
+                    spill_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        image_path.replace(spill_dir / image_path.name)
+                        if metadata_path.exists():
+                            metadata_path.replace(spill_dir / metadata_path.name)
+                    except OSError as move_err:
+                        logging.warning(
+                            "Could not spill %s to SD: %s", image_path.name, move_err
+                        )
+                return False
+            image_path.unlink(missing_ok=True)
+            metadata_path.unlink(missing_ok=True)
+            state.last_upload_at = now_local_iso()
+            state.last_error = None
+            logging.info("Uploaded %s", image_path.name)
+        return True
 
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    ram_dir.mkdir(parents=True, exist_ok=True)
+
+    if not _upload_dir(spill_dir, on_failure="leave"):
+        return
+    _upload_dir(ram_dir, on_failure="spill")
     upload_camera_pending(settings, work_dir, state)
 
 
@@ -1553,7 +1588,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                 return
             next_config_poll = now + poll_seconds
 
-        upload_pending(settings, work_dir, state)
+        upload_pending(settings, work_dir, work_dir / "pending", work_dir / "pending", state)
         state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
         state.pending_count += measure_camera_pending(work_dir)
 
@@ -1640,7 +1675,7 @@ def run_agent(settings: Dict[str, Any]) -> None:
                         "Evicted %d oldest pending captures (%d bytes) to stay under %d-byte cap",
                         evicted_count, evicted_bytes, max_pending_bytes,
                     )
-                upload_pending(settings, work_dir, state)
+                upload_pending(settings, work_dir, work_dir / "pending", work_dir / "pending", state)
                 state.pending_count, state.pending_bytes = measure_pending(work_dir / "pending", work_dir / "pending")
                 state.pending_count += measure_camera_pending(work_dir)
                 next_capture = last_capture + interval_seconds
