@@ -1468,9 +1468,9 @@ def upload_pending(
                 if on_failure == "spill" and directory != spill_dir:
                     spill_dir.mkdir(parents=True, exist_ok=True)
                     try:
-                        image_path.replace(spill_dir / image_path.name)
+                        shutil.move(str(image_path), spill_dir / image_path.name)
                         if metadata_path.exists():
-                            metadata_path.replace(spill_dir / metadata_path.name)
+                            shutil.move(str(metadata_path), spill_dir / metadata_path.name)
                     except OSError as move_err:
                         logging.warning(
                             "Could not spill %s to SD: %s", image_path.name, move_err
@@ -1488,7 +1488,8 @@ def upload_pending(
 
     if not _upload_dir(spill_dir, on_failure="leave"):
         return
-    _upload_dir(ram_dir, on_failure="spill")
+    if not _upload_dir(ram_dir, on_failure="spill"):
+        return
     upload_camera_pending(settings, work_dir, state)
 
 
