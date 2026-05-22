@@ -1429,6 +1429,10 @@ async def upload_image(
     with destination.open("wb") as output_file:
         shutil.copyfileobj(image.file, output_file)
 
+    if destination.stat().st_size == 0:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
     background_tasks.add_task(
         ensure_frame_thumbnail,
         destination,

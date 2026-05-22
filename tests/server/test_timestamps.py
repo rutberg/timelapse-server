@@ -41,3 +41,17 @@ def test_upload_with_z_header_still_works(client):
     body = response.json()
     assert "tomatoes/2026-05-04/" in body["path"]
     assert "20260504T053500" in body["path"]
+
+
+def test_upload_rejects_zero_byte_image(client, tmp_data_dir):
+    response = client.post(
+        "/api/cameras/tomatoes/upload",
+        headers={"X-Captured-At": "2026-05-04T05:35:00Z"},
+        files={"image": ("frame.jpg", io.BytesIO(b""), "image/jpeg")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Uploaded image is empty"
+
+    image_root = tmp_data_dir / "images" / "tomatoes"
+    assert not any(image_root.rglob("*.jpg"))
