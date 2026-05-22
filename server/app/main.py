@@ -1430,7 +1430,7 @@ async def upload_image(
         shutil.copyfileobj(image.file, output_file)
 
     if destination.stat().st_size == 0:
-        destination.unlink(missing_ok=True)
+        destination.unlink()
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
 
     background_tasks.add_task(
