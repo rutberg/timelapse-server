@@ -91,7 +91,7 @@ function rssiQuality(dbm) {
 }
 
 function renderConnectionBlock(status) {
-    const q = rssiQuality(status?.signal_dbm);
+    const q = rssiQuality(status?.is_online ? status?.signal_dbm : null);
     const bars = [1, 2, 3, 4]
         .map(
             (n) => `
@@ -106,7 +106,7 @@ function renderConnectionBlock(status) {
       <div class="col" style="gap:2px">
         <div style="font-size:15px;font-weight:500;color:${q.tone};text-transform:capitalize">${q.label}</div>
         <div class="mono small" style="color:var(--soft)">
-          ${status?.signal_dbm != null ? `${status.signal_dbm} dBm` : "no RSSI"}
+          ${status?.is_online && status?.signal_dbm != null ? `${status.signal_dbm} dBm` : "no RSSI"}
         </div>
       </div>
     </div>`;

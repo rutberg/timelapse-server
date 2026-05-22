@@ -11,6 +11,7 @@ from typing import Optional
 MAX_CONCURRENT_RENDERS = 1
 RECENT_TTL_SECONDS = 60.0
 REAPER_INTERVAL_SECONDS = 5.0
+VAAPI_DEVICE = "/dev/dri/renderD128"
 
 
 @dataclass
@@ -50,6 +51,7 @@ class RenderRunner:
         self._reaper: Optional[asyncio.Task] = None
         self._current_id: Optional[str] = None
         self._current_proc: Optional[asyncio.subprocess.Process] = None
+        self._vaapi = Path(VAAPI_DEVICE).exists()
 
     async def start(self) -> None:
         if self._worker is None:
@@ -150,13 +152,23 @@ class RenderRunner:
                 output_path.unlink(missing_ok=True)
 
     async def _run_mp4(self, job: JobState, list_path: Path, output_path: Path) -> None:
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-f", "concat", "-safe", "0", "-i", str(list_path),
-            "-vf", f"fps={job.fps},format=yuv420p",
-            "-c:v", "libx264", "-movflags", "+faststart",
-            "-progress", "pipe:1", str(output_path),
-        ]
+        if self._vaapi:
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-vaapi_device", VAAPI_DEVICE,
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-vf", f"fps={job.fps},format=nv12,hwupload",
+                "-c:v", "h264_vaapi", "-movflags", "+faststart",
+                "-progress", "pipe:1", str(output_path),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-vf", f"fps={job.fps},format=yuv420p",
+                "-c:v", "libx264", "-movflags", "+faststart",
+                "-progress", "pipe:1", str(output_path),
+            ]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
