@@ -697,7 +697,7 @@ def list_camera_images(camera_id: str) -> List[Path]:
     base = DATA_DIR / "images" / camera_id
     if not base.exists():
         return []
-    return sorted(base.glob("*/*.jpg"))
+    return [p for p in sorted(base.glob("*/*.jpg")) if p.stat().st_size > 0]
 
 
 def list_valid_camera_frames(camera_id: str) -> List[Path]:
@@ -1199,14 +1199,20 @@ def post_checkin(
     cameras[camera_id] = record
     save_store(store)
 
+    store_agents = agent_store()
     try:
-        agent = agent_store().get(camera_id)
+        agent = store_agents.get(camera_id)
     except KeyError:
         agent = None
     if agent is not None and agent.status == "provisioned":
         from app.agents import KeyArchive
 
         KeyArchive(DATA_DIR).archive_private_key(camera_id)
+
+        source_ip = status.get("source_ip")
+        if source_ip and agent.ip_fallback != source_ip:
+            agent.ip_fallback = source_ip
+            store_agents._write(agent)
 
     return {"acknowledged": True, "last_seen": now_iso}
 
